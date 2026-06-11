@@ -404,6 +404,7 @@ document.addEventListener("DOMContentLoaded", function () {
             resetBtn.style.display = "flex";
             updateProgress(queue.length, queue.length);
             renderExportBtn();
+            saveAuditLog();
         }
 
         // ---- LLM extraction: fires independently per file ----
@@ -660,40 +661,53 @@ document.addEventListener("DOMContentLoaded", function () {
         }
 
         function exportToCsv() {
+            // User-facing CSV: one row per file, one column per field
             var FIELDS = [
                 { key: "bank_name",             label: "Bank Name" },
                 { key: "fi_num",                label: "FI Code" },
                 { key: "master_account_number", label: "Master Account No." },
                 { key: "sub_account_number",    label: "Sub Account No." },
             ];
-            var rows = [csvRow(["Filename", "Field", "Extracted", "Expected", "Status"])];
+
+            var rows = [csvRow(["File Name", "Bank Name", "FI Code", "Master Account No.", "Sub Account No."])];
+
             queue.forEach(function (item) {
                 var filename = item.file.name;
+
                 if (item.extractError || !item.extractResult) {
-                    FIELDS.forEach(function (f) { rows.push(csvRow([filename, f.label, "ERROR", "", "FAIL"])); });
+                    rows.push(csvRow([filename, "ERROR", "ERROR", "ERROR", "ERROR"]));
                     return;
                 }
+
+                var d = item.extractResult.data || {};
                 var cmp = item.extractResult.comparison || null;
-                FIELDS.forEach(function (f) {
-                    var extracted = "", expected = "", match = "";
-                    if (cmp && cmp[f.key]) {
-                        extracted = cmp[f.key].extracted != null ? cmp[f.key].extracted : "";
-                        expected  = cmp[f.key].expected  != null ? cmp[f.key].expected  : "";
-                        match = !cmp.csv_row_found ? "NO REFERENCE" : (cmp[f.key].match ? "PASS" : "FAIL");
-                    } else {
-                        var d = item.extractResult.data || {};
-                        extracted = d[f.key] != null ? d[f.key] : "";
-                        match = "NO REFERENCE";
-                    }
-                    rows.push(csvRow([filename, f.label, extracted, expected, match]));
-                });
+
+                function getVal(key) {
+                    if (d[key] != null && d[key] !== "") return d[key];
+                    if (cmp && cmp[key] && cmp[key].extracted != null) return cmp[key].extracted;
+                    return "";
+                }
+
+                rows.push(csvRow([
+                    filename,
+                    getVal("bank_name"),
+                    getVal("fi_num"),
+                    getVal("master_account_number"),
+                    getVal("sub_account_number"),
+                ]));
             });
+
+            downloadCsvBlob(rows, "extraction");
+        }
+
+        function downloadCsvBlob(rows, prefix) {
             var blob = new Blob([rows.join("\r\n")], { type: "text/csv;charset=utf-8;" });
             var url  = URL.createObjectURL(blob);
             var a    = document.createElement("a");
             a.href   = url;
             var now  = new Date();
-            a.download = "extraction_" + now.getFullYear() +
+            a.download = prefix + "_" +
+                now.getFullYear() +
                 String(now.getMonth() + 1).padStart(2, "0") +
                 String(now.getDate()).padStart(2, "0") + "_" +
                 String(now.getHours()).padStart(2, "0") +
@@ -703,6 +717,28 @@ document.addEventListener("DOMContentLoaded", function () {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
+        }
+
+        function saveAuditLog() {
+            // Collect every completed result and POST to server for silent disk write
+            var payload = queue
+                .filter(function (item) { return item.extractResult || item.extractError; })
+                .map(function (item) {
+                    return {
+                        filename:       item.file.name,
+                        extractResult:  item.extractResult || null,
+                        extractError:   item.extractError  || null,
+                    };
+                });
+
+            fetch("/extract/audit-log", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ results: payload }),
+            }).catch(function (err) {
+                // Audit log is best-effort — never surface errors to the user
+                console.warn("Audit log save failed:", err);
+            });
         }
 
         function csvRow(fields) {

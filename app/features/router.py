@@ -162,3 +162,76 @@ async def ocr_only(file: UploadFile = File(...)) -> JSONResponse:
         return JSONResponse({"status": "done", "text": text, "txt_filename": txt_filename, "error": None})
     except Exception as exc:
         return JSONResponse({"status": "error", "text": None, "txt_filename": None, "error": str(exc)})
+    
+    # ---------------------------------------------------------------------------
+# Audit log — developer-only, never served back to the browser
+# ---------------------------------------------------------------------------
+
+_AUDIT_DIR = Path("audit_logs").resolve()
+_AUDIT_DIR.mkdir(parents=True, exist_ok=True)
+
+_AUDIT_FIELDS = [
+    ("bank_name",             "Bank Name"),
+    ("fi_num",                "FI Code"),
+    ("master_account_number", "Master Account No."),
+    ("sub_account_number",    "Sub Account No."),
+]
+
+
+def _write_audit_csv(records: list[dict]) -> None:
+    """Write one audit CSV per batch run to audit_logs/. Never exposed via HTTP."""
+    import csv
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = _AUDIT_DIR / f"audit_{timestamp}.csv"
+
+    header = ["File Name"]
+    for _key, label in _AUDIT_FIELDS:
+        header += [f"Extracted {label}", f"Expected {label}"]
+
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(header)
+
+        for record in records:
+            filename     = record.get("filename", "")
+            extract_res  = record.get("extractResult") or {}
+            extract_err  = record.get("extractError")
+
+            if extract_err or not extract_res:
+                row = [filename] + ["ERROR", ""] * len(_AUDIT_FIELDS)
+                writer.writerow(row)
+                continue
+
+            data = extract_res.get("data") or {}
+            cmp  = extract_res.get("comparison") or {}
+
+            row = [filename]
+            for key, _label in _AUDIT_FIELDS:
+                extracted = data.get(key) or ""
+                expected  = (cmp.get(key) or {}).get("expected") or ""
+                row += [extracted, expected]
+
+            writer.writerow(row)
+
+    logger.info("Audit log saved: %s (%d record(s))", path, len(records))
+
+
+@router.post("/audit-log", include_in_schema=False)
+async def save_audit_log(payload: dict) -> JSONResponse:
+    """
+    Receives the full batch result from the browser and writes an audit CSV
+    to audit_logs/ on disk. Returns 204 — the response body is intentionally
+    empty so the browser never reads sensitive comparison data back.
+    """
+    from fastapi.responses import Response
+
+    records = payload.get("results") or []
+    if records:
+        # Run the blocking file-write in a thread so we don't block the event loop
+        import asyncio
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _write_audit_csv, records)
+
+    return Response(status_code=204)
