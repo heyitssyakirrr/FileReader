@@ -177,6 +177,39 @@ _AUDIT_FIELDS = [
     ("sub_account_number",    "Sub Account No."),
 ]
 
+_TIMING_FIELDS = [
+    "OCR Start", "OCR End", "OCR Duration",
+    "LLM Start", "LLM End", "LLM Duration",
+]
+
+
+def _fmt_duration(start_iso: str | None, end_iso: str | None) -> str:
+    from datetime import datetime, timezone
+    if not start_iso or not end_iso:
+        return ""
+    try:
+        s = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        secs = (e - s).total_seconds()
+        if secs >= 60:
+            m = int(secs // 60)
+            s2 = secs % 60
+            return f"{m}m {s2:.1f}s"
+        return f"{secs:.1f}s"
+    except Exception:
+        return ""
+
+
+def _fmt_ts(iso: str | None) -> str:
+    from datetime import datetime
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
 
 def _write_audit_csv(records: list[dict]) -> None:
     """Write one audit XLSX per batch run to audit_logs/ with colour-coded expected columns."""
@@ -212,6 +245,7 @@ def _write_audit_csv(records: list[dict]) -> None:
     for _key, label in _AUDIT_FIELDS:
         header += [f"Extracted {label}", f"Expected {label}"]
     header.append("Accurate Count")
+    header += _TIMING_FIELDS
 
     ws.append(header)
     for col_idx, _ in enumerate(header, start=1):
@@ -236,6 +270,18 @@ def _write_audit_csv(records: list[dict]) -> None:
 
         if extract_err or not extract_res:
             row_data = [filename] + ["ERROR", ""] * len(_AUDIT_FIELDS) + [0]
+            ocr_start = record.get("ocrStart")
+            ocr_end   = record.get("ocrEnd")
+            llm_start = record.get("llmStart")
+            llm_end   = record.get("llmEnd")
+            row_data += [
+                _fmt_ts(ocr_start),
+                _fmt_ts(ocr_end),
+                _fmt_duration(ocr_start, ocr_end),
+                _fmt_ts(llm_start),
+                _fmt_ts(llm_end),
+                _fmt_duration(llm_start, llm_end),
+            ]
             ws.append(row_data)
             row_num = ws.max_row
             for col_idx in range(1, len(row_data) + 1):
@@ -263,6 +309,18 @@ def _write_audit_csv(records: list[dict]) -> None:
                 accurate_count += 1
 
         row_data.append(accurate_count)
+        ocr_start = record.get("ocrStart")
+        ocr_end   = record.get("ocrEnd")
+        llm_start = record.get("llmStart")
+        llm_end   = record.get("llmEnd")
+        row_data += [
+            _fmt_ts(ocr_start),
+            _fmt_ts(ocr_end),
+            _fmt_duration(ocr_start, ocr_end),
+            _fmt_ts(llm_start),
+            _fmt_ts(llm_end),
+            _fmt_duration(llm_start, llm_end),
+        ]
         total_accurate += accurate_count
         total_fields += len(_AUDIT_FIELDS)
         ws.append(row_data)
@@ -294,6 +352,36 @@ def _write_audit_csv(records: list[dict]) -> None:
     for col_idx in range(1, len(summary_row) + 1):
         cell = ws.cell(row=row_num, column=col_idx)
         cell.font = total_font
+        cell.border = thin_border
+
+     # --- BATCH SUMMARY row (timing) ---
+    all_ocr_starts = [r.get("ocrStart") for r in records if r.get("ocrStart")]
+    all_ocr_ends   = [r.get("ocrEnd")   for r in records if r.get("ocrEnd")]
+    all_llm_starts = [r.get("llmStart") for r in records if r.get("llmStart")]
+    all_llm_ends   = [r.get("llmEnd")   for r in records if r.get("llmEnd")]
+
+    batch_ocr_start = min(all_ocr_starts) if all_ocr_starts else None
+    batch_ocr_end   = max(all_ocr_ends)   if all_ocr_ends   else None
+    batch_llm_start = min(all_llm_starts) if all_llm_starts else None
+    batch_llm_end   = max(all_llm_ends)   if all_llm_ends   else None
+
+    batch_row = ["BATCH SUMMARY"] + [""] * (len(_AUDIT_FIELDS) * 2 + 1)
+    batch_row += [
+        _fmt_ts(batch_ocr_start),
+        _fmt_ts(batch_ocr_end),
+        _fmt_duration(batch_ocr_start, batch_ocr_end),
+        _fmt_ts(batch_llm_start),
+        _fmt_ts(batch_llm_end),
+        _fmt_duration(batch_llm_start, batch_llm_end),
+    ]
+    ws.append(batch_row)
+    row_num = ws.max_row
+    batch_fill = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+    batch_font = Font(bold=True, size=11)
+    for col_idx in range(1, len(batch_row) + 1):
+        cell = ws.cell(row=row_num, column=col_idx)
+        cell.fill = batch_fill
+        cell.font = batch_font
         cell.border = thin_border
 
     # --- Auto-fit column widths ---
