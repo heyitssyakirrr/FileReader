@@ -31,9 +31,9 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from ..core.config import get_settings
-from .router import _run_extraction
-from ..services.file_service import decode_txt_bytes, validate_and_read_upload
+from app.core.config import get_settings
+from app.features.router import _run_extraction
+from app.services.file_service import decode_txt_bytes, validate_and_read_upload
 
 logger = logging.getLogger(__name__)
 

@@ -9,10 +9,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .core.config import get_settings
-from .features.batch_router import router as batch_router
-from .features.router import router as extract_router
-from .summary.router import router as summarise_router
+from app.core.config import get_settings
+from app.features.batch_router import router as batch_router
+from app.features.router import router as extract_router
+from app.summary.router import router as summarise_router
 
 logging.basicConfig(
     level=logging.DEBUG,

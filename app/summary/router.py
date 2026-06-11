@@ -8,17 +8,17 @@ from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, File, UploadFile
 
-from core.config import get_settings
-from summary.prompt import build_summary_prompt
-from models.schemas import (
+from app.core.config import get_settings
+from app.summary.prompt import build_summary_prompt
+from app.models.schemas import (
     DailySummary,
     ExtractionMeta,
     MonthlySummary,
     SummaryResponse,
     SummaryResult,
 )
-from services.file_service import decode_txt_bytes, validate_and_read_upload
-from services.llm_client import LLMClient
+from app.services.file_service import decode_txt_bytes, validate_and_read_upload
+from app.services.llm_client import LLMClient
 
 router = APIRouter(prefix="/summarise", tags=["Summarisation"])
 llm_client = LLMClient()

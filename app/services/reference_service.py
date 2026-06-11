@@ -20,7 +20,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-from models.schemas import ComparisonResult, FieldComparisonDetail
+from app.models.schemas import ComparisonResult, FieldComparisonDetail
 
 logger = logging.getLogger(__name__)
 

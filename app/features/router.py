@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, File, UploadFile
 
-from features.prompt import build_extraction_prompt
-from models.schemas import ExtractResponse, ExtractionMeta, ExtractionResult
-from services.docling_client import DoclingClient
-from services.file_service import decode_txt_bytes, validate_and_read_upload
-from services.llm_client import LLMClient
-from services.reference_service import compare_extraction
+from app.features.prompt import build_extraction_prompt
+from app.models.schemas import ExtractResponse, ExtractionMeta, ExtractionResult
+from app.services.docling_client import DoclingClient
+from app.services.file_service import decode_txt_bytes, validate_and_read_upload
+from app.services.llm_client import LLMClient
+from app.services.reference_service import compare_extraction
 
 router = APIRouter(prefix="/extract", tags=["Extraction"])
 llm_client = LLMClient()
