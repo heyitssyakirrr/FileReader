@@ -177,7 +177,7 @@ html, body {
     background: var(--pb-surface);
     border: 1px solid var(--pb-border);
     border-radius: var(--radius);
-    padding: 28px 32px;
+    padding: 20px 24px;
 }
 
 .hero-badge {
@@ -194,11 +194,11 @@ html, body {
 }
 
 .page-title {
-    font-size: 28px;
+    font-size: 22px;
     font-weight: 700;
     color: #111;
     line-height: 1.2;
-    margin-bottom: 10px;
+    margin-bottom: 0;
 }
 
 .page-subtitle {
@@ -694,6 +694,7 @@ app.summary-table tr:last-child td { border-bottom: none; }
 .pill-status--queued   { background: #f0ece5; color: var(--pb-muted); }
 .pill-status--running  { background: #fde3de; color: var(--pb-red-dark); }
 .pill-status--done     { background: var(--pb-success-bg); color: var(--pb-success); }
+.pill-status--ocr-done { background: #fde3de; color: var(--pb-red-dark); }
 .pill-status--error    { background: var(--pb-error-bg); color: var(--pb-error); }
 
 .batch-file-pill .pill-remove {
@@ -859,16 +860,20 @@ app.summary-table tr:last-child td { border-bottom: none; }
 }
 
 #panelBatch .page-container {
-    /* Flex row — fills all height below tab-bar */
     flex: 1;
-    min-height: 0;             /* critical: allows children to shrink */
+    min-height: 0;
     display: flex;
     flex-direction: row;
     align-items: flex-start;
     justify-content: center;
     gap: 32px;
     padding: 32px 48px;
-    overflow: hidden;          /* children scroll individually */
+    overflow: hidden;
+}
+
+#panelBatch .page-container:not(.has-results) {
+    align-items: center;
+    justify-content: center;
 }
 
 /* Left column: upload controls — scrollable if queue grows tall */
@@ -888,14 +893,14 @@ app.summary-table tr:last-child td { border-bottom: none; }
     transition: width 0.4s ease, max-width 0.4s ease, min-width 0.4s ease;
 }
 
-/* Before results appear: expand upload panel to centre */
 #panelBatch .page-container:not(.has-results) .upload-panel {
-    width: 680px;
-    min-width: 400px;
-    max-width: 680px;
-    height: 100%;
-    min-height: 0;
+    width: 520px;
+    min-width: 320px;
+    max-width: 520px;
+    max-height: 90%;
+    height: auto;
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 /* Compact header once results are showing */

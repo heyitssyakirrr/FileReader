@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
+from pathlib import Path
 
 from app.features.prompt import build_extraction_prompt
 from app.models.schemas import ExtractResponse, ExtractionMeta, ExtractionResult
@@ -158,3 +160,35 @@ async def extract_from_file(file: UploadFile = File(...)) -> ExtractResponse:
         original_text = decode_txt_bytes(raw_bytes)
 
     return await _run_extraction(original_text=original_text, source=filename)
+
+@router.post("/from-text", response_model=ExtractResponse)
+async def extract_from_text(
+    text: str = Form(...),
+    filename: str = Form(...),
+) -> ExtractResponse:
+    """Accept raw OCR text and filename, run LLM extraction, return result."""
+    return await _run_extraction(original_text=text, source=filename)
+
+@router.post("/ocr-only")
+async def ocr_only(file: UploadFile = File(...)) -> JSONResponse:
+    """
+    Run PaddleOCR on a PDF and return the extracted text.
+    Does NOT call the LLM. The frontend uses this to decouple OCR from extraction.
+    
+    Response: { "status": "done"|"error", "text": str, "txt_filename": str, "error": str|null }
+    """
+    from fastapi.responses import JSONResponse
+
+    raw_bytes, ext = await validate_and_read_upload(file)
+    filename = file.filename or "uploaded_file"
+
+    if ext != ".pdf":
+        return JSONResponse({"status": "error", "text": None, "txt_filename": None, "error": "Only PDF files are supported."})
+
+    try:
+        text = await _pdf_to_text_via_paddleocr(raw_bytes, filename)
+        stem = Path(filename).stem.lower().replace(" ", "_")
+        txt_filename = f"paddle_{stem}.txt"
+        return JSONResponse({"status": "done", "text": text, "txt_filename": txt_filename, "error": None})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "text": None, "txt_filename": None, "error": str(exc)})

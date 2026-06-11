@@ -228,18 +228,14 @@ document.addEventListener("DOMContentLoaded", function () {
     }
 
     // =========================================================================
-    // BATCH EXTRACTION WIDGET — PDF-only, two-stage display
+    // BATCH EXTRACTION WIDGET
     //
-    // Stage 1: Upload PDF → PaddleOCR (via /extract/from-file which internally
-    //          calls the paddle_ocr service) and show OCR download table.
-    //
-    // NOTE: The LLM extraction and OCR happen in a single POST /extract/from-file
-    // call on the backend. We display an intermediate "OCR done" state by showing
-    // the filename in the download table as soon as the full response arrives,
-    // then rendering the extraction result in the card below.
-    //
-    // If you want a true two-step UI (OCR first, then LLM separately), split
-    // the backend into two endpoints. For now we show both results together.
+    // Pipeline (concurrent):
+    //   1. OCR queue runs sequentially (one PDF at a time through PaddleOCR)
+    //   2. As soon as a file finishes OCR:
+    //      a. OCR result row appears in the download table immediately
+    //      b. LLM extraction fires independently (does NOT block OCR queue)
+    //   3. LLM result cards appear on the right as each finishes (out of order ok)
     // =========================================================================
     (function () {
         var dropZone      = document.getElementById("dropZoneBatch");
@@ -256,17 +252,16 @@ document.addEventListener("DOMContentLoaded", function () {
         var progressText  = document.getElementById("batchProgressText");
         var resultsPanel  = document.getElementById("batchResultsPanel");
         var pageContainer = document.getElementById("pageContainerBatch");
-
-        // OCR download table elements (in the upload panel)
         var ocrTableSection = document.getElementById("ocrDownloadSection");
         var ocrTableBody    = document.getElementById("ocrTableBody");
 
         if (!dropZone) return;
 
-        var queue = [];
-        var isRunning = false;
-        var idCounter = 0;
-        var exportBtn = null;
+        var queue      = [];   // { file, id, pillEl, statusEl }
+        var isRunning  = false;
+        var idCounter  = 0;
+        var exportBtn  = null;
+        var llmPending = 0;    // track in-flight LLM calls for export btn timing
 
         // ---- drag & drop ----
         dropZone.addEventListener("dragover", function (e) { e.preventDefault(); dropZone.classList.add("drag-over"); });
@@ -281,15 +276,13 @@ document.addEventListener("DOMContentLoaded", function () {
             var added = 0;
             for (var i = 0; i < fileList.length; i++) {
                 var f = fileList[i];
-                // PDF-only filter
                 if (!f.name.toLowerCase().endsWith(".pdf")) continue;
                 if (f.size > maxUploadMb * 1024 * 1024) continue;
                 var dup = queue.some(function (q) { return q.file.name === f.name && q.file.size === f.size; });
                 if (dup) continue;
-
-                var id = ++idCounter;
+                var id   = ++idCounter;
                 var pill = makePill(f.name, id);
-                queue.push({ file: f, id: id, pillEl: pill.el, statusEl: pill.statusEl, resultCardEl: null });
+                queue.push({ file: f, id: id, pillEl: pill.el, statusEl: pill.statusEl, extractResult: null, extractError: null });
                 fileListEl.appendChild(pill.el);
                 added++;
             }
@@ -330,109 +323,142 @@ document.addEventListener("DOMContentLoaded", function () {
             return { el: el, statusEl: statusSpan };
         }
 
-        // ---- submit ----
+        // ---- submit: kick off OCR queue ----
         submitBtn.addEventListener("click", function () {
             if (queue.length === 0 || isRunning) return;
             isRunning = true;
             submitBtn.style.display = "none";
-            resetBtn.style.display = "none";
+            resetBtn.style.display  = "none";
             spinner.classList.add("visible");
             submitLabel.textContent = "Processing\u2026";
             progressBar.style.display = "block";
             hideError();
             pageContainer.classList.add("has-results");
 
-            // Disable remove buttons while running
             fileListEl.querySelectorAll(".pill-remove").forEach(function (b) { b.disabled = true; });
 
-            processQueue(0);
+            runOcrQueue(0);
         });
 
-        // ---- process files one by one ----
-        function processQueue(index) {
+        // ---- OCR queue: sequential, one file at a time ----
+        function runOcrQueue(index) {
             updateProgress(index, queue.length);
 
             if (index >= queue.length) {
-                isRunning = false;
-                spinner.classList.remove("visible");
-                submitLabel.textContent = "Start Batch Extraction";
-                submitBtn.style.display = "";
-                submitBtn.disabled = true;
-                resetBtn.style.display = "flex";
-                updateProgress(queue.length, queue.length);
+                // OCR queue done — spinner stays until all LLM calls finish
+                finishOcrQueue();
                 return;
             }
 
             var item = queue[index];
-            setPillStatus(item.statusEl, "running", "Processing\u2026");
-
-            // Create a result card in the results panel (right column)
-            var card = makeResultCard(item.file.name);
-            item.resultCardEl = card.el;
-            resultsPanel.appendChild(card.el);
-            setTimeout(function () { card.el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, 50);
+            setPillStatus(item.statusEl, "running", "OCR\u2026");
 
             var formData = new FormData();
             formData.append("file", item.file);
 
-            fetch("/extract/from-file", { method: "POST", body: formData })
-                .then(function (response) {
-                    return response.json().then(function (result) {
-                        return { ok: response.ok, status: response.status, result: result };
-                    });
-                })
+            fetch("/extract/ocr-only", { method: "POST", body: formData })
+                .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
                 .then(function (obj) {
-                    if (!obj.ok || !obj.result.success) {
-                        var msg = obj.result.detail || obj.result.message || ("HTTP " + obj.status);
-                        setPillStatus(item.statusEl, "error", "Error");
-                        item.extractError = msg;
-                        fillResultCard(card, null, null, msg);
-                        // Add error row to OCR table
-                        addOcrTableRow(item.file.name, null);
-                        renderExportBtn();
+                    if (!obj.ok || obj.data.status === "error") {
+                        var errMsg = (obj.data && obj.data.error) || "OCR failed";
+                        setPillStatus(item.statusEl, "error", "OCR Error");
+                        addOcrTableRow(item.file.name, null, errMsg);
+                        // Still create a result card showing the OCR error
+                        var card = makeResultCard(item.file.name);
+                        resultsPanel.appendChild(card.el);
+                        fillResultCardError(card, errMsg);
                     } else {
-                        setPillStatus(item.statusEl, "done", "Done");
-                        item.extractResult = obj.result;
-
-                        var cmp = obj.result.comparison;
-                        var allMatch = cmp && cmp.all_match;
-                        var csvFound = cmp && cmp.csv_row_found;
-                        var statusStr = !csvFound ? "warn" : (allMatch ? "pass" : "fail");
-                        item.extractStatus = statusStr;
-
-                        // Add success row to OCR download table
-                        // The txt filename is derived from the source in meta
-                        var source = (obj.result.meta && obj.result.meta.source) || item.file.name;
-                        addOcrTableRow(item.file.name, source);
-
-                        fillResultCard(card, obj.result, statusStr, null);
-                        renderExportBtn();
+                        setPillStatus(item.statusEl, "ocr-done", "Extracting\u2026");
+                        addOcrTableRow(item.file.name, obj.data.txt_filename, null);
+                        // Fire LLM independently — do NOT await
+                        fireLlmExtraction(item, obj.data.text, obj.data.txt_filename);
                     }
                 })
                 .catch(function (err) {
+                    var msg = (err && err.message) ? err.message : String(err);
                     setPillStatus(item.statusEl, "error", "Error");
-                    fillResultCard(card, null, null, "Network error: " + err.message);
-                    addOcrTableRow(item.file.name, null);
+                    addOcrTableRow(item.file.name, null, msg);
+                    var card = makeResultCard(item.file.name);
+                    resultsPanel.appendChild(card.el);
+                    fillResultCardError(card, "Network error: " + msg);
                 })
                 .finally(function () {
-                    processQueue(index + 1);
+                    // Move to next file in OCR queue regardless of outcome
+                    runOcrQueue(index + 1);
+                });
+        }
+
+        function finishOcrQueue() {
+            isRunning = false;
+            // If no LLM calls are in-flight, we can restore the UI now
+            // Otherwise restoreUiAfterAll fires from the last LLM .finally()
+            if (llmPending === 0) restoreUiAfterAll();
+        }
+
+        function restoreUiAfterAll() {
+            isRunning = false;
+            spinner.classList.remove("visible");
+            submitLabel.textContent = "Start Batch Extraction";
+            submitBtn.style.display = "";
+            submitBtn.disabled = true;
+            resetBtn.style.display = "flex";
+            updateProgress(queue.length, queue.length);
+            renderExportBtn();
+        }
+
+        // ---- LLM extraction: fires independently per file ----
+        function fireLlmExtraction(item, ocrText, txtFilename) {
+            llmPending++;
+
+            // Create the result card immediately (shows "Waiting for LLM…")
+            var card = makeResultCard(item.file.name);
+            resultsPanel.appendChild(card.el);
+            setTimeout(function () { card.el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, 50);
+
+            var formData = new FormData();
+            formData.append("text", ocrText);
+            formData.append("filename", item.file.name);
+
+            fetch("/extract/from-text", { method: "POST", body: formData })
+                .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+                .then(function (obj) {
+                    if (!obj.ok || !obj.data.success) {
+                        var msg = (obj.data && (obj.data.detail || obj.data.message)) || ("HTTP " + (obj.status || "error"));                        item.extractError = msg;
+                        fillResultCardError(card, msg);
+                        setPillStatus(item.statusEl, "error", "LLM Error");
+                    } else {
+                        item.extractResult = obj.data;
+                        var cmp      = obj.data.comparison;
+                        var allMatch = cmp && cmp.all_match;
+                        var csvFound = cmp && cmp.csv_row_found;
+                        var status   = !csvFound ? "warn" : (allMatch ? "pass" : "fail");
+                        item.extractStatus = status;
+                        fillResultCard(card, obj.data, status);
+                        setPillStatus(item.statusEl, "done", "Done");
+                    }
+                })
+                .catch(function (err) {
+                    item.extractError = err.message;
+                    fillResultCardError(card, "Network error: " + err.message);
+                    setPillStatus(item.statusEl, "error", "Error");
+                })
+                .finally(function () {
+                    llmPending--;
+                    renderExportBtn();
+                    // If OCR queue already finished and this was the last LLM call
+                    if (!isRunning && llmPending === 0) restoreUiAfterAll();
                 });
         }
 
         // ---- OCR download table ----
-        function addOcrTableRow(originalName, source) {
+        function addOcrTableRow(originalName, txtFilename, errorMsg) {
             if (!ocrTableSection || !ocrTableBody) return;
-            ocrTableSection.style.display = "block";
+            ocrTableSection.style.display = "flex";
 
             var tr = document.createElement("tr");
-
-            // Derive the txt filename the paddle_ocr service would have generated.
-            // paddle_ocr saves as "paddle_<stem>.txt" where stem is lowercased filename.
-            var stem = originalName.replace(/\.[^/.]+$/, "").toLowerCase().replace(/\s+/g, "_");
-            var txtFilename = "paddle_" + stem + ".txt";
-
             var statusCell, actionCell;
-            if (source !== null) {
+
+            if (txtFilename) {
                 statusCell = '<span class="badge badge-done">Done</span>';
                 actionCell = '<a class="dl-link" href="/ocr-download/' + encodeURIComponent(txtFilename) + '" download="' + escHtml(txtFilename) + '">Download</a>';
             } else {
@@ -441,13 +467,15 @@ document.addEventListener("DOMContentLoaded", function () {
             }
 
             tr.innerHTML =
-                '<td class="col-name">' + escHtml(originalName) + '</td>' +
+                '<td class="col-name">' + escHtml(originalName) +
+                (errorMsg ? '<div style="font-size:11px;color:var(--pb-error);">' + escHtml(errorMsg) + '</div>' : '') +
+                '</td>' +
                 '<td class="col-status">' + statusCell + '</td>' +
                 '<td class="col-action">' + actionCell + '</td>';
             ocrTableBody.appendChild(tr);
         }
 
-        // ---- result card ----
+        // ---- result cards ----
         function makeResultCard(filename) {
             var el = document.createElement("div");
             el.className = "batch-result-card";
@@ -461,7 +489,7 @@ document.addEventListener("DOMContentLoaded", function () {
 
             var badge = document.createElement("span");
             badge.className = "batch-result-badge batch-result-badge--processing";
-            badge.textContent = "Processing\u2026";
+            badge.textContent = "Extracting\u2026";
 
             var chevron = document.createElementNS("http://www.w3.org/2000/svg", "svg");
             chevron.setAttribute("viewBox", "0 0 24 24");
@@ -480,10 +508,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
             var body = document.createElement("div");
             body.className = "batch-result-body open";
-
             var bodyInner = document.createElement("div");
             bodyInner.className = "batch-result-body-inner";
-
             var bodyContent = document.createElement("div");
             bodyContent.className = "batch-result-body-content";
             bodyContent.innerHTML = '<span style="font-size:13px;color:var(--pb-muted);font-style:italic;">Waiting for LLM response\u2026</span>';
@@ -502,15 +528,13 @@ document.addEventListener("DOMContentLoaded", function () {
             return { el: el, badge: badge, bodyContent: bodyContent };
         }
 
-        function fillResultCard(card, result, statusStr, errorText) {
-            if (errorText) {
-                card.badge.className = "batch-result-badge batch-result-badge--fail";
-                card.badge.textContent = "Error";
-                card.bodyContent.innerHTML = '<span style="font-size:13px;color:var(--pb-error);">&#10007; ' + escHtml(errorText) + '</span>';
-                return;
-            }
+        function fillResultCardError(card, msg) {
+            card.badge.className = "batch-result-badge batch-result-badge--fail";
+            card.badge.textContent = "Error";
+            card.bodyContent.innerHTML = '<span style="font-size:13px;color:var(--pb-error);">&#10007; ' + escHtml(msg) + '</span>';
+        }
 
-            // Badge shows verification status
+        function fillResultCard(card, result, statusStr) {
             var badgeLabels = { pass: "\u2713 All Match", fail: "\u2717 Mismatch", warn: "\u26A0 No Reference" };
             var badgeClass  = { pass: "pass", fail: "fail", warn: "warn" };
             card.badge.className = "batch-result-badge batch-result-badge--" + (badgeClass[statusStr] || "warn");
@@ -526,12 +550,13 @@ document.addEventListener("DOMContentLoaded", function () {
             }
 
             function fieldHtml(label, value) {
-                var valClass = value ? "field-value found" : "field-value not-found";
-                var valText  = value ? escHtml(value) : "Not found";
-                return '<div class="field-row"><div class="field-label">' + label + '</div><div class="' + valClass + '">' + valText + '</div></div>';
+                var cls  = value ? "field-value found" : "field-value not-found";
+                var text = value ? escHtml(value) : "Not found";
+                return '<div class="field-row"><div class="field-label">' + label + '</div><div class="' + cls + '">' + text + '</div></div>';
             }
 
-            var fieldsHtml = '<div class="results-card" style="flex:1;border:none;padding:0;">' +
+            var fieldsHtml =
+                '<div class="results-card" style="flex:1;border:none;padding:0;">' +
                 '<span class="section-label" style="display:block;margin-bottom:12px;">Extracted Fields</span>' +
                 fieldHtml("Bank Name",          fieldVal("bank_name")) +
                 fieldHtml("Customer Name",      fieldVal("name")) +
@@ -541,22 +566,15 @@ document.addEventListener("DOMContentLoaded", function () {
                 '</div>';
 
             var cmpHtml = buildComparisonHtml(result.comparison);
-
-            card.bodyContent.innerHTML =
-                '<div class="batch-fields-row">' + fieldsHtml + cmpHtml + '</div>';
+            card.bodyContent.innerHTML = '<div class="batch-fields-row">' + fieldsHtml + cmpHtml + '</div>';
         }
 
-        // ---- comparison panel (re-enabled) ----
         function buildComparisonHtml(comparison) {
             if (!comparison) return "";
-
             var LABELS = {
-                bank_name:             "Bank Name",
-                fi_num:                "FI Number",
-                master_account_number: "Master Account No.",
-                sub_account_number:    "Sub Account No.",
+                bank_name: "Bank Name", fi_num: "FI Number",
+                master_account_number: "Master Account No.", sub_account_number: "Sub Account No.",
             };
-
             var html = '<div style="flex:1;border:none;padding:0;">' +
                 '<span class="section-label" style="display:block;margin-bottom:12px;">Verification</span>';
 
@@ -574,18 +592,14 @@ document.addEventListener("DOMContentLoaded", function () {
             ["bank_name", "fi_num", "master_account_number", "sub_account_number"].forEach(function (key) {
                 var detail = comparison[key];
                 if (!detail) return;
-                var statusIcon, rowClass;
-                if (!comparison.csv_row_found) {
-                    statusIcon = "&#9888;"; rowClass = "cmp-warn";
-                } else {
-                    statusIcon = detail.match ? "&#10003;" : "&#10007;";
-                    rowClass   = detail.match ? "cmp-pass" : "cmp-fail";
-                }
-                html += '<tr class="' + rowClass + '">' +
+                var icon, cls;
+                if (!comparison.csv_row_found) { icon = "&#9888;"; cls = "cmp-warn"; }
+                else { icon = detail.match ? "&#10003;" : "&#10007;"; cls = detail.match ? "cmp-pass" : "cmp-fail"; }
+                html += '<tr class="' + cls + '">' +
                     '<td class="cmp-field-name">' + LABELS[key] + '</td>' +
                     '<td>' + escHtml(detail.extracted || "\u2014") + '</td>' +
                     '<td>' + escHtml(detail.expected  || "\u2014") + '</td>' +
-                    '<td class="cmp-status">' + statusIcon + '</td></tr>';
+                    '<td class="cmp-status">' + icon + '</td></tr>';
             });
 
             html += '</tbody></table></div></div>';
@@ -596,7 +610,7 @@ document.addEventListener("DOMContentLoaded", function () {
         function updateProgress(done, total) {
             var pct = total === 0 ? 0 : Math.round((done / total) * 100);
             progressFill.style.width = pct + "%";
-            progressText.textContent = done + " / " + total + " files";
+            progressText.textContent = done + " / " + total + " files (OCR)";
         }
 
         function setPillStatus(statusEl, type, text) {
@@ -606,15 +620,16 @@ document.addEventListener("DOMContentLoaded", function () {
 
         // ---- reset ----
         resetBtn.addEventListener("click", function () {
-            queue = [];
-            idCounter = 0;
+            queue      = [];
+            idCounter  = 0;
+            llmPending = 0;
             if (exportBtn) { exportBtn.remove(); exportBtn = null; }
             isRunning = false;
             fileListEl.innerHTML = "";
             fileListEl.style.display = "none";
             resultsPanel.innerHTML = "";
-            if (ocrTableSection) { ocrTableSection.style.display = "none"; }
-            if (ocrTableBody)    { ocrTableBody.innerHTML = ""; }
+            if (ocrTableSection) ocrTableSection.style.display = "none";
+            if (ocrTableBody)    ocrTableBody.innerHTML = "";
             progressBar.style.display = "none";
             progressFill.style.width = "0%";
             submitBtn.disabled = true;
@@ -633,14 +648,13 @@ document.addEventListener("DOMContentLoaded", function () {
         function renderExportBtn() {
             var anyDone = queue.some(function (q) { return q.extractResult || q.extractError; });
             if (!anyDone || exportBtn) return;
-
             exportBtn = document.createElement("button");
             exportBtn.className = "submit-btn";
             exportBtn.style.cssText = "margin-top:8px;background:var(--pb-success);font-size:13px;height:42px;";
             exportBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:15px;height:15px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> Export to CSV';
             exportBtn.addEventListener("click", exportToCsv);
             var parent = resetBtn.parentNode;
-            var next = resetBtn.nextSibling;
+            var next   = resetBtn.nextSibling;
             if (next) parent.insertBefore(exportBtn, next);
             else parent.appendChild(exportBtn);
         }
@@ -652,9 +666,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 { key: "master_account_number", label: "Master Account No." },
                 { key: "sub_account_number",    label: "Sub Account No." },
             ];
-
             var rows = [csvRow(["Filename", "Field", "Extracted", "Expected", "Status"])];
-
             queue.forEach(function (item) {
                 var filename = item.file.name;
                 if (item.extractError || !item.extractResult) {
@@ -676,12 +688,11 @@ document.addEventListener("DOMContentLoaded", function () {
                     rows.push(csvRow([filename, f.label, extracted, expected, match]));
                 });
             });
-
             var blob = new Blob([rows.join("\r\n")], { type: "text/csv;charset=utf-8;" });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement("a");
-            a.href = url;
-            var now = new Date();
+            var url  = URL.createObjectURL(blob);
+            var a    = document.createElement("a");
+            a.href   = url;
+            var now  = new Date();
             a.download = "extraction_" + now.getFullYear() +
                 String(now.getMonth() + 1).padStart(2, "0") +
                 String(now.getDate()).padStart(2, "0") + "_" +
