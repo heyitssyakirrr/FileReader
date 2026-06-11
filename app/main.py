@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -26,20 +27,46 @@ settings = get_settings()
 templates = Jinja2Templates(directory="app/templates")
 
 # ---------------------------------------------------------------------------
-# PaddleOCR results directory
-# This is the `results/` folder written by app.py (the paddle_ocr service).
-# Adjust this path if paddle_ocr runs from a different working directory.
+# OCR results directory — written by router.py after each in-process OCR run
 # ---------------------------------------------------------------------------
-_PADDLE_RESULTS_DIR = Path("results").resolve()
+_RESULTS_DIR = Path("results").resolve()
+_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Startup cleanup — delete .txt files older than ocr_results_max_age_days
+# ---------------------------------------------------------------------------
+
+def _cleanup_old_ocr_results() -> None:
+    max_age_seconds = settings.ocr_results_max_age_days * 86_400
+    cutoff = time.time() - max_age_seconds
+    deleted = 0
+    for f in _RESULTS_DIR.glob("*.txt"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception as exc:
+            logger.warning("Could not delete old OCR result %s: %s", f.name, exc)
+    if deleted:
+        logger.info(
+            "Startup cleanup: removed %d OCR result file(s) older than %d day(s)",
+            deleted, settings.ocr_results_max_age_days,
+        )
+    else:
+        logger.info(
+            "Startup cleanup: no OCR result files older than %d day(s)",
+            settings.ocr_results_max_age_days,
+        )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
-    logger.info("LLM endpoint      : %s", settings.llm_url)
-    logger.info("PaddleOCR service : %s", settings.paddle_ocr_base_url)
-    logger.info("OCR results dir   : %s", _PADDLE_RESULTS_DIR)
-    logger.info("Batch API         : POST /extract/batch (max %d files)", settings.max_files_per_batch)
+    logger.info("LLM endpoint : %s", settings.llm_url)
+    logger.info("OCR results  : %s (in-process PaddleOCR)", _RESULTS_DIR)
+    logger.info("Batch API    : POST /extract/batch (max %d files)", settings.max_files_per_batch)
+    _cleanup_old_ocr_results()
     yield
     logger.info("Shutting down %s", settings.app_name)
 
@@ -79,34 +106,26 @@ async def app_health() -> dict[str, str]:
 @app.get("/ocr-download/{filename}", tags=["OCR"])
 async def download_ocr_result(filename: str):
     """
-    Serve a .txt file from the PaddleOCR results directory.
-
-    The paddle_ocr service (app.py) writes results to its own `results/`
-    folder. This endpoint lets the main app's UI download those files
-    without exposing a separate port to the browser.
-
-    Path traversal is prevented by resolving the path and confirming it
-    remains inside _PADDLE_RESULTS_DIR.
+    Serve a .txt file from the OCR results directory.
+    Written by the in-process PaddleOCR run in router.py.
+    Path traversal is prevented by resolving and confirming the path
+    stays inside _RESULTS_DIR.
     """
-    # Prevent path traversal
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename.")
 
     safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename)
-    file_path = (_PADDLE_RESULTS_DIR / safe_name).resolve()
+    file_path = (_RESULTS_DIR / safe_name).resolve()
 
-    # Ensure the resolved path is still inside the results dir
     try:
-        file_path.relative_to(_PADDLE_RESULTS_DIR)
+        file_path.relative_to(_RESULTS_DIR)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid path.")
 
     if not file_path.exists():
         raise HTTPException(
             status_code=404,
-            detail=f"OCR result file '{safe_name}' not found. "
-                   "The PaddleOCR service may have already cleared it, "
-                   "or the filename is incorrect.",
+            detail=f"OCR result file '{safe_name}' not found.",
         )
 
     return FileResponse(

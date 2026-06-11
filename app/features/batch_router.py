@@ -117,6 +117,7 @@ async def _with_retry(label: str, base_timeout: float, coro_fn, *args, **kwargs)
 
 # ---------------------------------------------------------------------------
 # Pipeline Stage 1 — PaddleOCR with retry
+# Uses settings.ocr_timeout_seconds (dedicated OCR timeout, not LLM timeout)
 # ---------------------------------------------------------------------------
 
 async def _stage_ocr(files: list[UploadFile], queue: asyncio.Queue) -> None:
@@ -129,11 +130,11 @@ async def _stage_ocr(files: list[UploadFile], queue: asyncio.Queue) -> None:
             if ext == ".pdf":
                 text = await _with_retry(
                     f"OCR {filename}",
-                    settings.llm_timeout_seconds,   # reuse a generous timeout
+                    settings.ocr_timeout_seconds,       # dedicated OCR timeout
                     _pdf_to_text_via_paddleocr, raw_bytes, filename,
                 )
             else:
-                # TXT — instant decode, no network call
+                # TXT — instant decode, no OCR needed
                 text = decode_txt_bytes(raw_bytes)
 
             del raw_bytes
@@ -193,7 +194,7 @@ async def _stream_batch(files: list[UploadFile]) -> AsyncGenerator[str, None]:
 
                     result = await _with_retry(
                         f"LLM {filename}",
-                        settings.llm_timeout_seconds,
+                        settings.llm_timeout_seconds,   # LLM keeps its own timeout
                         _run_extraction,
                         original_text=text,
                         source=filename,

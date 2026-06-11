@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import tempfile
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
 
-import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pathlib import Path
 
 from app.features.prompt import build_extraction_prompt
 from app.models.schemas import ExtractResponse, ExtractionMeta, ExtractionResult
@@ -20,65 +24,70 @@ settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Single-worker executor — serialises OCR runs so concurrent requests don't
+# all hammer the CPU at once (fix for issue 4)
+# ---------------------------------------------------------------------------
+_OCR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="paddleocr")
 
 # ---------------------------------------------------------------------------
-# PaddleOCR helper — calls the local paddle_ocr FastAPI service
+# Results directory — .txt files written here after OCR, served by main.py
+# ---------------------------------------------------------------------------
+_RESULTS_DIR = Path("results").resolve()
+_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# PaddleOCR helper — calls process_pdf() directly in a thread-pool executor
 # ---------------------------------------------------------------------------
 
 async def _pdf_to_text_via_paddleocr(pdf_bytes: bytes, filename: str, timeout: float | None = None) -> str:
     """
-    Send a PDF to the local PaddleOCR FastAPI service (app.py, default port 5001)
-    and return the extracted plain text.
+    Run PaddleOCR in-process (blocking CPU work runs in a dedicated
+    single-worker executor so concurrent calls are serialised).
 
-    The paddle_ocr service exposes POST /upload which accepts multipart files
-    and returns JSON: { "results": [{ "status": "done"|"error", "output": "<filename>.txt", ... }] }
-
-    We then fetch the .txt content from GET /download/<filename>.
+    Fixes applied:
+      1. Uses tempfile.mkstemp() for a safe, guaranteed-unique temp path.
+      2. asyncio.wait_for() enforces the timeout so a hung PDF can't block forever.
+      4. _OCR_EXECUTOR (max_workers=1) prevents concurrent OCR runs from
+         competing for CPU.
     """
-    paddle_base_url = getattr(settings, "paddle_ocr_base_url", "http://127.0.0.1:5001")
-    effective_timeout = timeout if timeout is not None else settings.llm_timeout_seconds
+    from app.services.paddle_ocr import process_pdf
 
-    logger.debug("Sending PDF '%s' (%d bytes) to PaddleOCR at %s", filename, len(pdf_bytes), paddle_base_url)
+    # Issue 1 fix: use the OS temp dir — always exists, no manual mkdir needed
+    tmp_fd, tmp_str = tempfile.mkstemp(suffix=f"_{Path(filename).name}")
+    tmp_path = Path(tmp_str)
+    try:
+        import os
+        os.close(tmp_fd)
+        tmp_path.write_bytes(pdf_bytes)
 
-    async with httpx.AsyncClient(timeout=effective_timeout, verify=False) as client:
-        # Stage 1: upload + OCR
-        try:
-            upload_resp = await client.post(
-                f"{paddle_base_url}/upload",
-                files={"files": (filename, pdf_bytes, "application/pdf")},
-                data={"dpi": "300"},
-            )
-            upload_resp.raise_for_status()
-        except httpx.TimeoutException as exc:
-            raise HTTPException(status_code=504, detail="PaddleOCR service timed out during OCR.") from exc
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=502, detail=f"PaddleOCR service error: HTTP {exc.response.status_code}") from exc
-        except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail="Unable to connect to PaddleOCR service.") from exc
+        loop = asyncio.get_event_loop()
+        coro = loop.run_in_executor(
+            _OCR_EXECUTOR,                          # issue 4 fix: serialised executor
+            partial(process_pdf, str(tmp_path), 300),
+        )
 
-        data = upload_resp.json()
-        results = data.get("results", [])
-        if not results:
-            raise HTTPException(status_code=502, detail="PaddleOCR returned empty results.")
+        # Issue 2 fix: honour the timeout so a bad PDF can't hang forever
+        if timeout is not None:
+            text = await asyncio.wait_for(coro, timeout=timeout)
+        else:
+            text = await coro
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
-        result = results[0]
-        if result.get("status") == "error":
-            raise HTTPException(status_code=502, detail=f"PaddleOCR error: {result.get('error', 'unknown')}")
+    # Persist .txt result so /ocr-download/<filename> can serve it
+    stem = Path(filename).stem.lower().replace(" ", "_")
+    txt_filename = f"paddle_{stem}.txt"
+    (_RESULTS_DIR / txt_filename).write_text(text, encoding="utf-8")
+    logger.info("OCR result saved: %s (%d chars)", txt_filename, len(text))
 
-        output_filename = result.get("output")
-        if not output_filename:
-            raise HTTPException(status_code=502, detail="PaddleOCR did not return an output filename.")
+    return text
 
-        # Stage 2: download the extracted .txt
-        try:
-            dl_resp = await client.get(f"{paddle_base_url}/download/{output_filename}")
-            dl_resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=502, detail=f"Could not download OCR result: HTTP {exc.response.status_code}") from exc
 
-        text = dl_resp.text
-        logger.debug("PaddleOCR returned %d characters for '%s'", len(text), filename)
-        return text
+def _txt_filename_for(filename: str) -> str:
+    stem = Path(filename).stem.lower().replace(" ", "_")
+    return f"paddle_{stem}.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +170,7 @@ async def extract_from_file(file: UploadFile = File(...)) -> ExtractResponse:
 
     return await _run_extraction(original_text=original_text, source=filename)
 
+
 @router.post("/from-text", response_model=ExtractResponse)
 async def extract_from_text(
     text: str = Form(...),
@@ -169,26 +179,38 @@ async def extract_from_text(
     """Accept raw OCR text and filename, run LLM extraction, return result."""
     return await _run_extraction(original_text=text, source=filename)
 
+
 @router.post("/ocr-only")
 async def ocr_only(file: UploadFile = File(...)) -> JSONResponse:
     """
     Run PaddleOCR on a PDF and return the extracted text.
-    Does NOT call the LLM. The frontend uses this to decouple OCR from extraction.
-    
-    Response: { "status": "done"|"error", "text": str, "txt_filename": str, "error": str|null }
+    Also writes a .txt file to results/ so the UI download table works.
+    Does NOT call the LLM.
     """
-    from fastapi.responses import JSONResponse
-
     raw_bytes, ext = await validate_and_read_upload(file)
     filename = file.filename or "uploaded_file"
 
     if ext != ".pdf":
-        return JSONResponse({"status": "error", "text": None, "txt_filename": None, "error": "Only PDF files are supported."})
+        return JSONResponse({
+            "status": "error",
+            "text": None,
+            "txt_filename": None,
+            "error": "Only PDF files are supported.",
+        })
 
     try:
         text = await _pdf_to_text_via_paddleocr(raw_bytes, filename)
-        stem = Path(filename).stem.lower().replace(" ", "_")
-        txt_filename = f"paddle_{stem}.txt"
-        return JSONResponse({"status": "done", "text": text, "txt_filename": txt_filename, "error": None})
+        txt_filename = _txt_filename_for(filename)
+        return JSONResponse({
+            "status": "done",
+            "text": text,
+            "txt_filename": txt_filename,
+            "error": None,
+        })
     except Exception as exc:
-        return JSONResponse({"status": "error", "text": None, "txt_filename": None, "error": str(exc)})
+        return JSONResponse({
+            "status": "error",
+            "text": None,
+            "txt_filename": None,
+            "error": str(exc),
+        })

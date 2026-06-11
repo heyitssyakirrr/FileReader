@@ -20,12 +20,10 @@ class Settings(BaseSettings):
     max_tokens: int = 2048
 
     # ---------------------------------------------------------------------------
-    # PaddleOCR microservice configuration
-    # The paddle_ocr FastAPI app (app.py) runs on a separate port (default 5001).
-    # Set PADDLE_OCR_BASE_URL in .env to override.
+    # PaddleOCR (in-process) configuration
     # ---------------------------------------------------------------------------
-    paddle_ocr_base_url: str = "http://127.0.0.1:5001"
-    paddle_ocr_timeout_seconds: float = 300.0
+    ocr_timeout_seconds: float = 300.0
+    ocr_results_max_age_days: int = 7
 
     # ---------------------------------------------------------------------------
     # Input safety
@@ -50,7 +48,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
-    @field_validator("llm_base_url", "paddle_ocr_base_url")
+    @field_validator("llm_base_url")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
@@ -62,11 +60,11 @@ class Settings(BaseSettings):
             raise ValueError("llm_timeout_seconds must be positive")
         return v
 
-    @field_validator("paddle_ocr_timeout_seconds")
+    @field_validator("ocr_timeout_seconds")
     @classmethod
     def _positive_ocr_timeout(cls, v: float) -> float:
         if v <= 0:
-            raise ValueError("paddle_ocr_timeout_seconds must be positive")
+            raise ValueError("ocr_timeout_seconds must be positive")
         return v
 
     @field_validator("max_files_per_batch")
