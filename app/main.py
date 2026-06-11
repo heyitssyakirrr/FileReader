@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from app.core.config import get_settings
 from app.features.batch_router import router as batch_router
 from app.features.router import router as extract_router
+from app.features.ocr_router import router as ocr_router
 from app.summary.router import router as summarise_router
 
 logging.basicConfig(
@@ -65,6 +66,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
     logger.info("LLM endpoint : %s", settings.llm_url)
     logger.info("OCR results  : %s (in-process PaddleOCR)", _RESULTS_DIR)
+    logger.info("OCR service  : POST /ocr/upload, GET /ocr/download/<file>")
     logger.info("Batch API    : POST /extract/batch (max %d files)", settings.max_files_per_batch)
     _cleanup_old_ocr_results()
     yield
@@ -81,6 +83,7 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 app.include_router(extract_router)
 app.include_router(batch_router)
+app.include_router(ocr_router)
 app.include_router(summarise_router)
 
 
