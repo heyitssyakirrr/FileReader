@@ -1,0 +1,1074 @@
+:root {
+    --pb-red: #c52712;
+    --pb-red-dark: #b61702;
+    --pb-bg: #f4f1eb;
+    --pb-surface: #ffffff;
+    --pb-border: #d8d0c4;
+    --pb-border-dark: #beb4a5;
+    --pb-text: #1d1a17;
+    --pb-muted: #6c675f;
+    --pb-success: #145a32;
+    --pb-success-bg: #e9f6ee;
+    --pb-error: #8b1e1e;
+    --pb-error-bg: #fbeceb;
+    --pb-warn: #8a5a00;
+    --pb-warn-bg: #fdf4de;
+    --radius: 8px;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+html, body {
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: var(--pb-bg);
+    color: var(--pb-text);
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* TOPBAR */
+.topbar {
+    height: 64px;
+    background: var(--pb-red);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 48px;
+    flex-shrink: 0;
+}
+
+.topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.topbar-brand {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+}
+
+.topbar-divider {
+    width: 1px;
+    height: 22px;
+    background: rgba(255,255,255,0.3);
+}
+
+.topbar-title {
+    font-size: 14px;
+    color: rgba(255,255,255,0.85);
+}
+
+.topbar-right {
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.6);
+}
+
+/* PAGE WRAPPER — fills remaining height after topbar + footer */
+.page-wrapper {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* TAB BAR */
+.tab-bar {
+    display: flex;
+    border-bottom: 2px solid var(--pb-border);
+    background: var(--pb-surface);
+    padding: 0 48px;
+    flex-shrink: 0;
+}
+
+.tab-btn {
+    padding: 14px 28px;
+    border: none;
+    background: transparent;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--pb-muted);
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+.tab-btn:hover { color: var(--pb-text); }
+
+.tab-btn.active {
+    color: var(--pb-red);
+    border-bottom-color: var(--pb-red);
+}
+
+/* TAB PANEL — each panel fills available space */
+.tab-panel {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    flex-direction: column;
+}
+
+.tab-panel[style*="display:flex"],
+.tab-panel:not([style*="display:none"]) {
+    display: flex;
+}
+
+/* V1 tab — normal scroll */
+#panelExtract {
+    overflow-y: auto;
+}
+
+/* V2 Batch tab — no overflow on the panel itself; children handle it */
+#panelBatch {
+    overflow: hidden;
+}
+
+/* Statement tab — normal scroll */
+#panelSummarise {
+    overflow-y: auto;
+}
+
+/* PAGE LAYOUT */
+.page-container {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 48px;
+    gap: 32px;
+}
+
+/* For V1 and Summary — standard scroll container */
+#panelExtract .page-container,
+#panelSummarise .page-container {
+    height: auto;
+    overflow: visible;
+}
+
+/* UPLOAD PANEL */
+.upload-panel {
+    width: 100%;
+    max-width: 680px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    transition: max-width 0.4s ease;
+}
+
+.page-container.has-results .upload-panel {
+    max-width: 620px;
+}
+
+/* HEADER CARD */
+.panel-header {
+    background: var(--pb-surface);
+    border: 1px solid var(--pb-border);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+}
+
+.hero-badge {
+    display: inline-flex;
+    padding: 4px 12px;
+    border-radius: 999px;
+    background: #fde3de;
+    color: var(--pb-red-dark);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+}
+
+.page-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: #111;
+    line-height: 1.2;
+    margin-bottom: 10px;
+}
+
+.page-subtitle {
+    font-size: 14px;
+    color: var(--pb-muted);
+    line-height: 1.6;
+}
+
+/* UPLOAD CARD */
+.upload-card {
+    background: var(--pb-surface);
+    border: 1px solid var(--pb-border);
+    border-radius: var(--radius);
+    padding: 28px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.section-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--pb-muted);
+}
+
+/* DROP ZONE */
+.drop-zone {
+    position: relative;
+    border: 1.5px dashed var(--pb-border-dark);
+    border-radius: var(--radius);
+    min-height: 190px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #fcfbf9;
+    text-align: center;
+    cursor: pointer;
+    padding: 32px 24px;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.drop-zone:hover,
+.drop-zone.drag-over {
+    border-color: var(--pb-red);
+    background: #fff4f1;
+}
+
+.drop-zone input[type="file"] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+}
+
+.drop-icon {
+    width: 56px;
+    height: 56px;
+    border: 1.5px solid var(--pb-border-dark);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f7f3ec;
+    margin-bottom: 16px;
+}
+
+.drop-icon svg {
+    width: 26px;
+    height: 26px;
+    stroke: var(--pb-muted);
+}
+
+.drop-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: #111;
+    margin-bottom: 6px;
+}
+
+.drop-hint {
+    font-size: 13px;
+    color: var(--pb-muted);
+}
+
+/* FILE PILL */
+.file-pill {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    background: #fdeae6;
+    border: 1px solid #efc0b6;
+    border-radius: var(--radius);
+}
+
+.file-pill.visible { display: flex; }
+
+.file-pill-icon svg {
+    width: 16px;
+    height: 16px;
+    stroke: var(--pb-red-dark);
+}
+
+.file-pill-name {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: var(--pb-red-dark);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.file-pill-clear {
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--pb-muted);
+    display: flex;
+    align-items: center;
+}
+
+.file-pill-clear svg {
+    width: 15px;
+    height: 15px;
+    stroke: currentColor;
+}
+
+.file-pill-clear:hover { color: var(--pb-error); }
+
+/* BANNERS */
+.banner {
+    display: none;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.banner.visible { display: flex; }
+
+.banner svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.banner-error {
+    background: var(--pb-error-bg);
+    color: var(--pb-error);
+    border: 1px solid #ebc3c1;
+}
+
+.banner-warn {
+    background: var(--pb-warn-bg);
+    color: var(--pb-warn);
+    border: 1px solid #ead7a5;
+}
+
+/* BUTTONS */
+.submit-btn {
+    width: 100%;
+    border: none;
+    border-radius: var(--radius);
+    background: var(--pb-red);
+    color: #fff;
+    height: 52px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    transition: background 0.15s, opacity 0.15s;
+}
+
+.submit-btn:hover:not(:disabled) { background: var(--pb-red-dark); }
+.submit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.reset-btn {
+    width: 100%;
+    border: 1px solid var(--pb-border-dark);
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--pb-muted);
+    height: 46px;
+    font-size: 13px;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: border-color 0.15s, color 0.15s;
+}
+
+.reset-btn:hover {
+    border-color: var(--pb-red);
+    color: var(--pb-red);
+}
+
+.reset-btn svg { width: 13px; height: 13px; }
+
+.spinner {
+    display: none;
+    width: 15px;
+    height: 15px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.75s linear infinite;
+}
+
+.spinner.visible { display: inline-block; }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* RESULTS PANEL (V1) */
+.results-panel {
+    width: 0;
+    overflow: hidden;
+    opacity: 0;
+    flex-shrink: 0;
+    transition: width 0.4s ease, opacity 0.4s ease;
+}
+
+.page-container.has-results .results-panel {
+    width: 360px;
+    opacity: 1;
+    overflow: visible;
+}
+
+.page-container.has-results .results-panel--wide {
+    width: 520px;
+}
+
+.results-card {
+    width: 360px;
+    background: var(--pb-surface);
+    border: 1px solid var(--pb-border);
+    border-radius: var(--radius);
+    padding: 28px 26px;
+}
+
+.results-card--wide {
+    width: 520px;
+}
+
+.results-card .section-label {
+    display: block;
+    margin-bottom: 18px;
+}
+
+/* FIELD ROWS */
+.field-row {
+    padding: 14px 0;
+    border-bottom: 1px solid var(--pb-border);
+}
+
+.field-row:last-child { border-bottom: none; }
+
+.field-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--pb-muted);
+    margin-bottom: 6px;
+}
+
+.field-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--pb-text);
+    word-break: break-word;
+    line-height: 1.5;
+}
+
+.field-value.not-found {
+    font-style: italic;
+    font-weight: 400;
+    font-size: 13px;
+    color: var(--pb-muted);
+}
+
+.field-value.found { color: var(--pb-success); }
+
+/* SUMMARY TABLES */
+.summary-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--pb-text);
+    margin-bottom: 10px;
+    margin-top: 4px;
+}
+
+.summary-table-wrap {
+    overflow-x: auto;
+}
+
+.summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.summary-table th {
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--pb-muted);
+    border-bottom: 1px solid var(--pb-border);
+    white-space: nowrap;
+}
+
+.summary-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--pb-border);
+    color: var(--pb-text);
+    font-family: "Consolas", "Courier New", Courier, monospace;
+    white-space: nowrap;
+}
+
+.summary-table tr:last-child td { border-bottom: none; }
+
+/* FOOTER */
+.page-footer {
+    border-top: 1px solid var(--pb-border);
+    padding: 0 48px;
+    height: 44px;
+    font-size: 11px;
+    color: var(--pb-muted);
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    flex-shrink: 0;
+    background: rgba(255,255,255,0.5);
+}
+
+/* =========================================================
+   COMPARISON / VERIFICATION PANEL
+   ========================================================= */
+
+.results-cards-row {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+}
+
+#comparisonPanel {
+    min-height: 0;
+}
+
+#comparisonPanel:not(:empty) {
+    padding: 28px 26px;
+}
+
+.cmp-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 16px;
+}
+
+.cmp-badge--pass {
+    background: var(--pb-success-bg);
+    color: var(--pb-success);
+    border: 1px solid #b2dfc5;
+}
+
+.cmp-badge--fail {
+    background: var(--pb-error-bg);
+    color: var(--pb-error);
+    border: 1px solid #ebc3c1;
+}
+
+.cmp-badge--warn {
+    background: var(--pb-warn-bg);
+    color: var(--pb-warn);
+    border: 1px solid #ead7a5;
+}
+
+.cmp-table-wrap {
+    overflow-x: auto;
+}
+
+.cmp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.cmp-table th {
+    text-align: left;
+    padding: 7px 10px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--pb-muted);
+    border-bottom: 1px solid var(--pb-border);
+    white-space: nowrap;
+}
+
+.cmp-table td {
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--pb-border);
+    color: var(--pb-text);
+    word-break: break-all;
+}
+
+.cmp-table tr:last-child td { border-bottom: none; }
+
+.cmp-table .cmp-field-name {
+    font-weight: 600;
+    white-space: nowrap;
+    color: var(--pb-muted);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.cmp-table .cmp-status {
+    font-weight: 700;
+    font-size: 14px;
+    text-align: center;
+}
+
+.cmp-table tr.cmp-pass .cmp-status { color: var(--pb-success); }
+.cmp-table tr.cmp-fail .cmp-status { color: var(--pb-error); }
+.cmp-table tr.cmp-warn .cmp-status { color: var(--pb-warn); }
+.cmp-table tr.cmp-fail td { background: #fff8f8; }
+.cmp-table tr.cmp-pass td { background: #f8fdf9; }
+.cmp-table tr.cmp-warn td { background: var(--pb-warn-bg); }
+
+.page-container.has-results .results-panel--wide {
+    width: 680px;
+}
+
+/* =========================================================
+   BATCH FILE PILL (queue list)
+   ========================================================= */
+
+.batch-file-pill {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: #fcfbf9;
+    border: 1px solid var(--pb-border);
+    border-radius: var(--radius);
+    font-size: 13px;
+}
+
+.batch-file-pill .pill-name {
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 600;
+    color: var(--pb-text);
+}
+
+.batch-file-pill .pill-status {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+}
+
+.pill-status--queued   { background: #f0ece5; color: var(--pb-muted); }
+.pill-status--running  { background: #fde3de; color: var(--pb-red-dark); }
+.pill-status--done     { background: var(--pb-success-bg); color: var(--pb-success); }
+.pill-status--error    { background: var(--pb-error-bg); color: var(--pb-error); }
+
+.batch-file-pill .pill-remove {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    color: var(--pb-muted);
+    display: flex;
+    align-items: center;
+    padding: 0;
+}
+.batch-file-pill .pill-remove:hover { color: var(--pb-error); }
+.batch-file-pill .pill-remove svg { width: 14px; height: 14px; stroke: currentColor; }
+
+/* =========================================================
+   BATCH RESULT CARDS
+   ========================================================= */
+
+.batch-result-card {
+    background: var(--pb-surface);
+    border: 1px solid var(--pb-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    width: 100%;
+    flex-shrink: 0;
+}
+
+.batch-result-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    background: #f7f3ec;
+    border-bottom: 1px solid var(--pb-border);
+    cursor: pointer;
+    user-select: none;
+    gap: 12px;
+}
+
+.batch-result-header:hover { background: #f0ece3; }
+
+.batch-result-filename {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--pb-text);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    flex: 1;
+}
+
+.batch-result-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 999px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.batch-result-badge--pass        { background: var(--pb-success-bg); color: var(--pb-success); border: 1px solid #b2dfc5; }
+.batch-result-badge--fail        { background: var(--pb-error-bg); color: var(--pb-error); border: 1px solid #ebc3c1; }
+.batch-result-badge--warn        { background: var(--pb-warn-bg); color: var(--pb-warn); border: 1px solid #ead7a5; }
+.batch-result-badge--processing  { background: #fde3de; color: var(--pb-red-dark); border: 1px solid #efc0b6; }
+
+.batch-result-chevron {
+    width: 16px;
+    height: 16px;
+    stroke: var(--pb-muted);
+    transition: transform 0.2s;
+    flex-shrink: 0;
+}
+
+/* Collapse animation */
+.batch-result-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.25s ease;
+}
+
+.batch-result-body.open {
+    grid-template-rows: 1fr;
+}
+
+.batch-result-body-inner {
+    overflow: hidden;
+}
+
+.batch-result-body.open .batch-result-body-inner {
+    overflow: visible;
+}
+
+.batch-result-body-content {
+    padding: 20px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+/* Two-column grid inside each batch result card */
+.batch-fields-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    align-items: start;
+    width: 100%;
+    min-width: 0;
+}
+
+.batch-fields-row > * {
+    min-width: 0;
+}
+
+/* Inner cards inside batch rows — strip their own border/padding */
+.batch-result-body-content .results-card {
+    border: none;
+    padding: 0;
+    width: 100%;
+}
+
+/* Text sizing inside cards */
+.batch-result-body-content .field-value {
+    word-break: break-all;
+    white-space: normal;
+    font-size: 13px;
+}
+
+.batch-result-body-content .field-label {
+    font-size: 10px;
+}
+
+.batch-result-body-content .field-row {
+    padding: 10px 0;
+}
+
+/* cmp-table inside batch cards */
+.batch-result-body-content .cmp-table td {
+    white-space: normal;
+    word-break: break-all;
+    font-size: 11px;
+    padding: 7px 8px;
+}
+
+.batch-result-body-content .cmp-table th {
+    font-size: 10px;
+    padding: 6px 8px;
+}
+
+/* =========================================================
+   BATCH TAB LAYOUT — THE KEY FIX
+   The entire batch tab must form a proper scroll chain:
+   #panelBatch (flex column, overflow:hidden, full height)
+     └─ .page-container (flex row, flex:1, min-height:0, overflow:hidden)
+          ├─ .upload-panel (left column, overflow-y:auto, fixed max-width)
+          └─ #batchResultsPanel (right column, flex:1, overflow-y:auto)
+   ========================================================= */
+
+#panelBatch {
+    /* Fill the tab area; do NOT scroll here */
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#panelBatch .page-container {
+    /* Flex row — fills all height below tab-bar */
+    flex: 1;
+    min-height: 0;             /* critical: allows children to shrink */
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 32px;
+    padding: 32px 48px;
+    overflow: hidden;          /* children scroll individually */
+}
+
+/* Left column: upload controls — scrollable if queue grows tall */
+#panelBatch .upload-panel {
+    /* Fixed width column; scrolls its own content */
+    width: 340px;
+    min-width: 280px;
+    max-width: 340px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    height: 100%;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-bottom: 16px;
+    transition: width 0.4s ease, max-width 0.4s ease, min-width 0.4s ease;
+}
+
+/* Before results appear: expand upload panel to centre */
+#panelBatch .page-container:not(.has-results) .upload-panel {
+    width: 680px;
+    min-width: 400px;
+    max-width: 680px;
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* Compact header once results are showing */
+#panelBatch .page-container.has-results .panel-header {
+    padding: 14px 18px;
+}
+
+#panelBatch .page-container.has-results .page-title {
+    font-size: 18px;
+    margin-bottom: 6px;
+}
+
+#panelBatch .page-container.has-results .page-subtitle {
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+#panelBatch .page-container.has-results .upload-card {
+    padding: 16px;
+    gap: 12px;
+}
+
+#panelBatch .page-container.has-results .drop-zone {
+    min-height: 110px;
+    padding: 18px 14px;
+}
+
+#panelBatch .page-container.has-results .drop-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+#panelBatch .page-container.has-results .drop-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+#panelBatch .page-container.has-results .drop-title {
+    font-size: 13px;
+    margin-bottom: 4px;
+}
+
+#panelBatch .page-container.has-results .drop-hint {
+    font-size: 11px;
+}
+
+#panelBatch .page-container.has-results .submit-btn {
+    height: 40px;
+    font-size: 13px;
+}
+
+#panelBatch .page-container.has-results .reset-btn {
+    height: 36px;
+    font-size: 12px;
+}
+
+/* Right column: batch results — THE scrollable area */
+#batchResultsPanel {
+    flex: 1;
+    min-width: 0;
+    min-height: 0; 
+    height: 100%;
+    max-height: 100%;            /* critical */
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;          /* THIS is where scrolling happens */
+    overflow-x: hidden;
+    padding-bottom: 24px;
+    /* Hidden until batch starts */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+/* Show results panel once processing starts */
+#panelBatch .page-container.has-results #batchResultsPanel {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* Nice scrollbar for the results panel */
+#batchResultsPanel::-webkit-scrollbar {
+    width: 6px;
+}
+#batchResultsPanel::-webkit-scrollbar-track {
+    background: transparent;
+}
+#batchResultsPanel::-webkit-scrollbar-thumb {
+    background: var(--pb-border-dark);
+    border-radius: 3px;
+}
+#batchResultsPanel::-webkit-scrollbar-thumb:hover {
+    background: var(--pb-muted);
+}
+
+/* Also style the upload panel scrollbar when it needs to scroll */
+#panelBatch .upload-panel::-webkit-scrollbar {
+    width: 4px;
+}
+#panelBatch .upload-panel::-webkit-scrollbar-track {
+    background: transparent;
+}
+#panelBatch .upload-panel::-webkit-scrollbar-thumb {
+    background: var(--pb-border);
+    border-radius: 2px;
+}
+
+/* =========================================================
+   RESPONSIVE
+   ========================================================= */
+
+@media (max-width: 900px) {
+    .topbar { padding: 0 24px; }
+    .topbar-title, .topbar-right { display: none; }
+    .tab-bar { padding: 0 24px; }
+
+    /* V1 and Summary: stack vertically */
+    #panelExtract .page-container,
+    #panelSummarise .page-container {
+        flex-direction: column;
+        align-items: center;
+        padding: 24px 16px;
+    }
+
+    .upload-panel,
+    .page-container.has-results .upload-panel { max-width: 100%; }
+
+    .page-container.has-results .results-panel,
+    .page-container.has-results .results-panel--wide {
+        width: 100%;
+        opacity: 1;
+        overflow: visible;
+    }
+
+    .results-card,
+    .results-card--wide { width: 100%; }
+
+    .page-footer { padding: 0 24px; }
+
+    /* Batch: revert to vertical scroll on mobile */
+    #panelBatch {
+        overflow-y: auto;
+        height: auto;
+    }
+
+    #panelBatch .page-container {
+        flex-direction: column;
+        align-items: stretch;
+        height: auto;
+        overflow: visible;
+        padding: 16px;
+        min-height: 0;
+    }
+
+    #panelBatch .upload-panel,
+    #panelBatch .page-container:not(.has-results) .upload-panel {
+        width: 100% !important;
+        min-width: 0 !important;
+        max-width: 100% !important;
+        height: auto;
+        overflow-y: visible;
+    }
+
+    #batchResultsPanel {
+        height: auto;
+        min-height: 300px;
+        overflow-y: visible;
+        opacity: 1;
+        pointer-events: auto;
+    }
+
+    .batch-fields-row { grid-template-columns: 1fr; }
+}

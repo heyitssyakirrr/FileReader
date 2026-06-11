@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ app_name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+    <style>
+        /*
+         * Height chain for the full-page layout:
+         *   html → body → .page-wrapper → .tab-panel → (panel-specific)
+         * Everything must participate in flex so children can use flex:1 / min-height:0.
+         */
+        html, body {
+            height: 100%;
+            overflow: hidden;
+        }
+
+        /* page-wrapper fills the gap between topbar and footer */
+        .page-wrapper {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        /*
+         * Tab panels: hidden by default.
+         * The active one is shown as flex so its children can use flex-based sizing.
+         * JS switches display via .style.display — we override only hidden ones here.
+         */
+        .tab-panel { display: none; }
+
+        /* V1: simple scrollable column */
+        #panelExtract {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+        }
+
+        /* V2 Batch: fixed-height, children scroll independently */
+        #panelBatch {
+            flex: 1;
+            min-height: 0;
+            overflow: hidden;
+        }
+
+        /* Statement: simple scrollable column */
+        #panelSummarise {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body data-max-upload-mb="{{ max_upload_mb }}">
+
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="topbar-brand">PUBLIC BANK</div>
+            <div class="topbar-divider"></div>
+            <div class="topbar-title">Document Extraction</div>
+        </div>
+        <div class="topbar-right">USERNAME</div>
+    </header>
+
+    <div class="page-wrapper">
+
+        <!-- TAB BAR -->
+        <div class="tab-bar">
+            <button class="tab-btn active" id="tabBatch" onclick="switchTab('batch')">
+                Customer Details
+            </button>
+            <!-- Statement Summary tab hidden until feature is ready
+            <button class="tab-btn" id="tabSummarise" onclick="switchTab('summarise')">
+                Statement Summary
+            </button>
+            -->
+        </div>
+
+        <!-- =====================================================
+             TAB: CUSTOMER DETAILS V2 (BATCH)
+             Layout: full-height flex row.
+               Left  → upload controls (fixed width, scrollable)
+               Right → results list    (flex-1, scrollable)
+             ===================================================== -->
+        <div class="tab-panel" id="panelBatch" style="display:flex; flex-direction:column;">
+            <div class="page-container" id="pageContainerBatch">
+
+                <!-- Left: upload column -->
+                <section class="upload-panel">
+                    <div class="panel-header">
+                        <div class="hero-badge">Batch Extraction</div>
+                        <h1 class="page-title">Batch Customer Data Extraction</h1>
+                        <p class="page-subtitle">Upload multiple .txt or .pdf documents. Files are sent to the LLM one at a time in queue order. Results appear as each file completes.</p>
+                    </div>
+                    <div class="upload-card">
+                        <div class="section-label">Upload Documents</div>
+                        <div id="dropZoneBatch" class="drop-zone">
+                            <input id="fileInputBatch" type="file" accept=".txt,.pdf,.md" multiple>
+                            <div class="drop-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14,2 14,8 20,8"></polyline>
+                                    <line x1="12" y1="18" x2="12" y2="12"></line>
+                                    <polyline points="9,15 12,12 15,15"></polyline>
+                                </svg>
+                            </div>
+                            <div class="drop-title">Drop your files here</div>
+                            <div class="drop-hint">Supports .txt, .pdf, and .md — max {{ max_upload_mb }} MB each</div>
+                        </div>
+
+                        <!-- File queue list — scrollable within the upload panel -->
+                        <div id="batchFileList" style="display:none; flex-direction:column; gap:8px;"></div>
+
+                        <div id="errorBannerBatch" class="banner banner-error">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="12"></line>
+                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                            </svg>
+                            <span id="errorMessageBatch"></span>
+                        </div>
+
+                        <div id="batchProgressBar" style="display:none;">
+                            <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+                                <span class="section-label">Progress</span>
+                                <span id="batchProgressText" style="font-size:12px; color:var(--pb-muted);"></span>
+                            </div>
+                            <div style="background:var(--pb-border); border-radius:999px; height:6px; overflow:hidden;">
+                                <div id="batchProgressFill" style="height:100%; width:0%; background:var(--pb-red); border-radius:999px; transition:width 0.3s ease;"></div>
+                            </div>
+                        </div>
+
+                        <button id="submitBtnBatch" class="submit-btn" type="button" disabled>
+                            <span id="submitSpinnerBatch" class="spinner"></span>
+                            <span id="submitLabelBatch">Start Batch Extraction</span>
+                        </button>
+                        <button id="resetBtnBatch" class="reset-btn" type="button" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                <polyline points="1 4 1 10 7 10"></polyline>
+                                <path d="M3.51 15a9 9 0 1 0 .49-4.5"></path>
+                            </svg>
+                            Clear &amp; start over
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Right: scrollable results stream -->
+                <section id="batchResultsPanel"></section>
+
+            </div>
+        </div>
+
+        <!-- =====================================================
+             TAB: STATEMENT SUMMARY (hidden until feature is ready)
+             ===================================================== -->
+        <div class="tab-panel" id="panelSummarise" style="display:none;">
+            <div class="page-container" id="pageContainerSummarise">
+
+                <section class="upload-panel">
+                    <div class="panel-header">
+                        <div class="hero-badge">Statement Summary</div>
+                        <h1 class="page-title">Bank Statement Summary</h1>
+                        <p class="page-subtitle">Upload a .txt bank statement. The LLM reads the date and balance columns; Python computes the min, max, and closing balances.</p>
+                    </div>
+                    <div class="upload-card">
+                        <div class="section-label">Upload Statement</div>
+                        <div id="dropZoneSummarise" class="drop-zone">
+                            <input id="fileInputSummarise" type="file" accept=".txt,.pdf,.md">
+                            <div class="drop-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14,2 14,8 20,8"></polyline>
+                                    <line x1="12" y1="18" x2="12" y2="12"></line>
+                                    <polyline points="9,15 12,12 15,15"></polyline>
+                                </svg>
+                            </div>
+                            <div class="drop-title">Drop your file here</div>
+                            <div class="drop-hint">Supports .txt, .pdf, and .md — max {{ max_upload_mb }} MB</div>
+                        </div>
+                        <div id="filePillSummarise" class="file-pill">
+                            <span class="file-pill-icon">
+                                <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                    <polyline points="14,2 14,8 20,8"></polyline>
+                                </svg>
+                            </span>
+                            <span id="fileNameSummarise" class="file-pill-name"></span>
+                            <button id="clearFileBtnSummarise" class="file-pill-clear" type="button" title="Remove file">
+                                <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                        <div id="errorBannerSummarise" class="banner banner-error">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                                <circle cx="12" cy="12" r="10"></circle>
+                                <line x1="12" y1="8" x2="12" y2="12"></line>
+                                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                            </svg>
+                            <span id="errorMessageSummarise"></span>
+                        </div>
+                        <div id="warnBannerSummarise" class="banner banner-warn">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                                <line x1="12" y1="9" x2="12" y2="13"></line>
+                                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                            </svg>
+                            <span id="warnMessageSummarise"></span>
+                        </div>
+                        <button id="submitBtnSummarise" class="submit-btn" type="button" disabled>
+                            <span id="submitSpinnerSummarise" class="spinner"></span>
+                            <span id="submitLabelSummarise">Extract Summary</span>
+                        </button>
+                        <button id="resetBtnSummarise" class="reset-btn" type="button" style="display:none;">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                                <polyline points="1 4 1 10 7 10"></polyline>
+                                <path d="M3.51 15a9 9 0 1 0 .49-4.5"></path>
+                            </svg>
+                            Extract another file
+                        </button>
+                    </div>
+                </section>
+
+                <section class="results-panel results-panel--wide" id="resultsPanelSummarise">
+                    <div class="results-card results-card--wide">
+                        <span class="section-label">Statement Summary</span>
+
+                        <div class="summary-section-title">Overall</div>
+                        <div class="field-row">
+                            <div class="field-label">Min Balance</div>
+                            <div id="resOverallMin" class="field-value">—</div>
+                        </div>
+                        <div class="field-row">
+                            <div class="field-label">Max Balance</div>
+                            <div id="resOverallMax" class="field-value">—</div>
+                        </div>
+                        <div class="field-row">
+                            <div class="field-label">Closing Balance</div>
+                            <div id="resOverallClosing" class="field-value">—</div>
+                        </div>
+
+                        <div class="summary-section-title" style="margin-top:18px;">Monthly Breakdown</div>
+                        <div id="resMonthlyTable" class="summary-table-wrap">—</div>
+
+                        <div class="summary-section-title" style="margin-top:18px;">Daily Breakdown</div>
+                        <div id="resDailyTable" class="summary-table-wrap">—</div>
+                    </div>
+                </section>
+
+            </div>
+        </div>
+
+        <footer class="page-footer">
+            <span>{{ app_name }} v{{ app_version }}</span>
+            <span>Supported: .txt, .pdf, and .md files</span>
+            <span>Max file size: {{ max_upload_mb }} MB</span>
+        </footer>
+
+    </div>
+
+    <script src="{{ url_for('static', path='app.js') }}"></script>
+</body>
+</html>
