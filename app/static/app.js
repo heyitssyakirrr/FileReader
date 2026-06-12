@@ -282,7 +282,7 @@ document.addEventListener("DOMContentLoaded", function () {
                 if (dup) continue;
                 var id   = ++idCounter;
                 var pill = makePill(f.name, id);
-                queue.push({ file: f, id: id, pillEl: pill.el, statusEl: pill.statusEl, extractResult: null, extractError: null, ocrStart: null, ocrEnd: null, llmStart: null, llmEnd: null });
+                queue.push({ file: f, id: id, pillEl: pill.el, statusEl: pill.statusEl, extractResult: null, extractError: null });                
                 fileListEl.appendChild(pill.el);
                 added++;
             }
@@ -356,12 +356,9 @@ document.addEventListener("DOMContentLoaded", function () {
             var formData = new FormData();
             formData.append("file", item.file);
 
-            item.ocrStart = new Date();
-
             fetch("/extract/ocr-only", { method: "POST", body: formData })
                 .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
                 .then(function (obj) {
-                    item.ocrEnd = new Date();
                     if (!obj.ok || obj.data.status === "error") {
                         var errMsg = (obj.data && obj.data.error) || "OCR failed";
                         setPillStatus(item.statusEl, "error", "OCR Error");
@@ -407,7 +404,6 @@ document.addEventListener("DOMContentLoaded", function () {
             resetBtn.style.display = "flex";
             updateProgress(queue.length, queue.length);
             renderExportBtn();
-            saveAuditLog();
         }
 
         // ---- LLM extraction: fires independently per file ----
@@ -423,12 +419,9 @@ document.addEventListener("DOMContentLoaded", function () {
             formData.append("text", ocrText);
             formData.append("filename", item.file.name);
 
-            item.llmStart = new Date();
-
             fetch("/extract/from-text", { method: "POST", body: formData })
                 .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
                 .then(function (obj) {
-                    item.llmEnd = new Date();
                     if (!obj.ok || !obj.data.success) {
                         var msg = (obj.data && (obj.data.detail || obj.data.message)) || ("HTTP " + (obj.status || "error"));                        item.extractError = msg;
                         fillResultCardError(card, msg);
@@ -670,32 +663,6 @@ document.addEventListener("DOMContentLoaded", function () {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-        }
-
-        function saveAuditLog() {
-            // Collect every completed result and POST to server for silent disk write
-            var payload = queue
-                .filter(function (item) { return item.extractResult || item.extractError; })
-                .map(function (item) {
-                    return {
-                        filename:      item.file.name,
-                        extractResult: item.extractResult || null,
-                        extractError:  item.extractError  || null,
-                        ocrStart:  item.ocrStart  ? item.ocrStart.toISOString()  : null,
-                        ocrEnd:    item.ocrEnd    ? item.ocrEnd.toISOString()    : null,
-                        llmStart:  item.llmStart  ? item.llmStart.toISOString()  : null,
-                        llmEnd:    item.llmEnd    ? item.llmEnd.toISOString()    : null,
-                    };
-                });
-
-            fetch("/extract/audit-log", {
-                method:  "POST",
-                headers: { "Content-Type": "application/json" },
-                body:    JSON.stringify({ results: payload }),
-            }).catch(function (err) {
-                // Audit log is best-effort — never surface errors to the user
-                console.warn("Audit log save failed:", err);
-            });
         }
 
         function csvRow(fields) {

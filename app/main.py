@@ -28,7 +28,7 @@ settings = get_settings()
 templates = Jinja2Templates(directory="app/templates")
 
 # ---------------------------------------------------------------------------
-# OCR results directory — written by router.py after each in-process OCR run
+# OCR results directory — written by ocr_router and extract/ocr-only
 # ---------------------------------------------------------------------------
 _RESULTS_DIR = Path("results").resolve()
 _RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,6 +49,7 @@ def _cleanup_old_ocr_results() -> None:
                 deleted += 1
         except Exception as exc:
             logger.warning("Could not delete old OCR result %s: %s", f.name, exc)
+
     if deleted:
         logger.info(
             "Startup cleanup: removed %d OCR result file(s) older than %d day(s)",
@@ -66,7 +67,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
     logger.info("LLM endpoint : %s", settings.llm_url)
     logger.info("OCR results  : %s (in-process PaddleOCR)", _RESULTS_DIR)
-    logger.info("OCR service  : POST /ocr/upload, GET /ocr/download/<file>")
     logger.info("Batch API    : POST /extract/batch (max %d files)", settings.max_files_per_batch)
     _cleanup_old_ocr_results()
     yield
@@ -106,18 +106,25 @@ async def app_health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ---------------------------------------------------------------------------
+# OCR text file download
+#
+# Serves .txt files written to results/ by the in-process PaddleOCR runs.
+# A single route here replaces the previous duplicate that also existed in
+# ocr_router.py — all OCR downloads go through this one endpoint.
+#
+# Security: filename is sanitised and the resolved path is confirmed to
+# stay inside _RESULTS_DIR before serving (prevents path traversal).
+# ---------------------------------------------------------------------------
+
 @app.get("/ocr-download/{filename}", tags=["OCR"])
-async def download_ocr_result(filename: str):
-    """
-    Serve a .txt file from the OCR results directory.
-    Written by the in-process PaddleOCR run in router.py.
-    Path traversal is prevented by resolving and confirming the path
-    stays inside _RESULTS_DIR.
-    """
+async def download_ocr_result(filename: str) -> FileResponse:
     if ".." in filename or "/" in filename or "\\" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename.")
 
-    safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename)
+    safe_name = "".join(
+        c if c.isalnum() or c in "._- " else "_" for c in filename
+    )
     file_path = (_RESULTS_DIR / safe_name).resolve()
 
     try:
