@@ -67,7 +67,7 @@ The section ALWAYS lists the three values with these logical roles:
     Master Account No.   → master_account_number
     Sub Account No.      → sub_account_number
 
-This section appears in ONE OF SIX layouts. Detect which one is present:
+This section appears in ONE OF SEVEN layouts. Detect which one is present:
 
 --- LAYOUT A: pipe/markdown table ---
 All three values appear as cells in a single table row.
@@ -146,6 +146,31 @@ Example:
     → master_account_number = "120 116000030001 22981DS1001"  (first value, exact)
     → sub_account_number = "620100052154291"  (first value, strip leading colon)
 
+--- LAYOUT G: Flat CCRIS table (two raw lines, no structure) ---
+PaddleOCR cannot preserve table columns. A CCRIS table becomes two flat lines:
+  Line 1 (header): contains the words "FI", "Master", "Sub" in left-to-right order
+  Line 2 (values): three numbers separated by spaces on a single line
+
+The values appear in the SAME LEFT-TO-RIGHT ORDER as their column headers:
+  Position 1 (leftmost)  → FI Code           → SHORTEST number (~9-10 chars)
+  Position 2 (middle)    → Master Account No. 
+  Position 3 (rightmost) → Sub Account No.    
+
+Use digit LENGTH as the authoritative tiebreaker — do NOT rely on position alone:
+  fi_num                = the shortest number (9-10 chars, starts with 0 or 3)
+  master_account_number = the longest number
+  sub_account_number    = the remaining number
+
+CRITICAL: The header labels tell you the column ORDER, not the values.
+The values are on the NEXT line. Never confuse header words with account numbers.
+
+Example:
+  Line 1: "FICode Master Act Number Sub Act.Number"
+  Line 2: "034707062 00000060729028921708888001 0000000406070003660"
+  → fi_num                = "034707062"                  (9 digits — shortest)
+  → master_account_number = "00000060729028921708888001"  (26 digits — longest)
+  → sub_account_number    = "0000000406070003660"         (16 digits — middle)
+
 In ALL layouts the logical roles are:
     fi_num → master_account_number → sub_account_number
 
@@ -167,7 +192,7 @@ MISTAKE 2 — Layout D, sub account copied from master instead of (c) line:
     c) Sub Account No    : 387805903200000
   WRONG:  fi_num="022612078"  master="3000170346"  sub="3000170346"
   RIGHT:  fi_num="022612078"  master="3000170346"  sub="387805903200000"
-  Why: sub_account_number comes from the (c) line, NOT a copy of (b).
+  Why: sub_account_number comes from the (c) line, NOT a copy of (b). Unless they both have the same value
 
 MISTAKE 3 — footnote digit mistaken for sub account (combined label):
   Document:  MASTER / SUB ACCOUNT NO. 2 : 172-412188-7-00000
@@ -184,6 +209,15 @@ MISTAKE 5 — fi_num starting with 1 (CCRIS layout):
   Document:  CCRIS Fl Code : 1035312016, 035312016
   WRONG:  fi_num="1035312016"
   RIGHT:  fi_num="035312016"  (take the value starting with 0, not 1)
+
+MISTAKE 6 — fi_num and master swapped in Flat CCRIS table (Layout G):
+  Document (two flat lines from OCR):
+    "FICode Master Act Number Sub Act.Number"
+    "034707062 00000060729028921708888001 0000000406070003660"
+  WRONG:  fi_num="00000060729028921708888001"  master="034707062"
+  RIGHT:  fi_num="034707062"  master="00000060729028921708888001"  sub="0000000406070003660"
+  Why: The shortest number (9 digits) is ALWAYS fi_num. The longest is ALWAYS master.
+       Never assign a 20+ digit number to fi_num.
 
 --- FI CODE (fi_num) ---
 - A short institution/routing code — typically either 9 characters with only 9 digits or 
@@ -331,6 +365,9 @@ STEP 2 — DETECT THE LAYOUT
       share that value; digit after "NO." is a footnote marker, not the sub account.
   "CCRIS" prefix with comma-separated values → Layout E: fi_num starts with 0 or 3
       (first value only per line).
+  Header line ("FICode Master Act Number Sub Act.Number") followed by a bare
+      values line with three space-separated numbers → Layout G: assign by digit
+      length: shortest=fi_num, longest=master, middle=sub.
 
 STEP 3 — ASSIGN THE THREE VALUES
   fi_num                ← shortest value, starts with 0 or 3, usually 9-10 chars never shorter or longer than 9-10 chars
