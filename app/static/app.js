@@ -229,11 +229,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
     // =========================================================================
     // BATCH EXTRACTION WIDGET
-    //
-    // Pipeline (server-driven):
-    //   1. POST /extract/batch-pipeline with all files at once
-    //   2. Read newline-delimited JSON stream from server
-    //   3. On each event, update pills, OCR table, and result cards
     // =========================================================================
     (function () {
         var dropZone        = document.getElementById("dropZoneBatch");
@@ -255,11 +250,14 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (!dropZone) return;
 
-        var queue     = [];   // { file, id, pillEl, statusEl, card }
+        var queue     = [];
         var idCounter = 0;
         var exportBtn = null;
-        // resultsByFilename: filename → result dict, for CSV export
         var resultsByFilename = {};
+
+        // Track which filenames already have a row in the OCR table,
+        // so a subsequent LLM error doesn't add a duplicate error row.
+        var ocrRowAddedFor = {};
 
         // ---- drag & drop ----
         dropZone.addEventListener("dragover", function (e) { e.preventDefault(); dropZone.classList.add("drag-over"); });
@@ -336,10 +334,10 @@ document.addEventListener("DOMContentLoaded", function () {
             hideError();
             pageContainer.classList.add("has-results");
             resultsByFilename = {};
+            ocrRowAddedFor = {};
 
             fileListEl.querySelectorAll(".pill-remove").forEach(function (b) { b.disabled = true; });
 
-            // Build FormData with all files
             var formData = new FormData();
             queue.forEach(function (item) {
                 formData.append("files", item.file);
@@ -375,7 +373,7 @@ document.addEventListener("DOMContentLoaded", function () {
                     }
                     buffer += decoder.decode(chunk.value, { stream: true });
                     var lines = buffer.split("\n");
-                    buffer = lines.pop(); // keep incomplete line
+                    buffer = lines.pop();
                     lines.forEach(function (line) {
                         line = line.trim();
                         if (!line) return;
@@ -401,18 +399,21 @@ document.addEventListener("DOMContentLoaded", function () {
             var item = findQueueItem(event.filename);
 
             if (event.stage === "ocr_done") {
-                updateProgress(event.index - 1, event.total);
                 if (item) setPillStatus(item.statusEl, "ocr-done", "Extracting\u2026");
+
+                // Mark that this file already has an OCR row so we don't add
+                // a second one if the LLM later fails.
+                ocrRowAddedFor[event.filename] = true;
                 addOcrTableRow(event.filename, event.txt_filename, null);
 
-                // Create result card now, showing "Waiting for LLM…"
                 var card = makeResultCard(event.filename);
                 if (item) item.card = card;
                 resultsPanel.appendChild(card.el);
                 setTimeout(function () { card.el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, 50);
 
             } else if (event.stage === "llm_done") {
-                updateProgress(event.index, event.total);
+                llmDoneCount++;
+                updateProgress(llmDoneCount, event.total);
                 var result = event.result;
                 resultsByFilename[event.filename] = result;
 
@@ -423,13 +424,22 @@ document.addEventListener("DOMContentLoaded", function () {
                 renderExportBtn();
 
             } else if (event.stage === "error") {
-                updateProgress(event.index, event.total);
+                llmDoneCount++
+                updateProgress(llmDoneCount, event.total);
                 var errMsg = event.error || "Unknown error";
 
                 if (item) {
                     setPillStatus(item.statusEl, "error", "Error");
-                    addOcrTableRow(event.filename, null, errMsg);
-                    // If no card yet (OCR failed before llm_done), create one
+
+                    // Only add an OCR table row if OCR itself failed (no row yet).
+                    // If OCR succeeded but LLM failed, the OCR row is already there —
+                    // just update its status badge to reflect the LLM error inline
+                    // on the result card, not on the OCR table.
+                    if (!ocrRowAddedFor[event.filename]) {
+                        ocrRowAddedFor[event.filename] = true;
+                        addOcrTableRow(event.filename, null, errMsg);
+                    }
+
                     if (!item.card) {
                         var errCard = makeResultCard(event.filename);
                         item.card = errCard;
@@ -576,6 +586,7 @@ document.addEventListener("DOMContentLoaded", function () {
             queue            = [];
             idCounter        = 0;
             resultsByFilename = {};
+            ocrRowAddedFor   = {};
             if (exportBtn) { exportBtn.remove(); exportBtn = null; }
             fileListEl.innerHTML = "";
             fileListEl.style.display = "none";
