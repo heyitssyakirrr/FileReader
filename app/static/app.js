@@ -250,10 +250,12 @@ document.addEventListener("DOMContentLoaded", function () {
 
         if (!dropZone) return;
 
-        var queue     = [];
+        var queue = [];
         var idCounter = 0;
         var exportBtn = null;
         var resultsByFilename = {};
+        var llmDoneCount = 0;
+        var completedByFilename = {};
 
         // Track which filenames already have a row in the OCR table,
         // so a subsequent LLM error doesn't add a duplicate error row.
@@ -335,6 +337,8 @@ document.addEventListener("DOMContentLoaded", function () {
             pageContainer.classList.add("has-results");
             resultsByFilename = {};
             ocrRowAddedFor = {};
+            completedByFilename = {};
+            llmDoneCount = 0;
 
             fileListEl.querySelectorAll(".pill-remove").forEach(function (b) { b.disabled = true; });
 
@@ -389,6 +393,14 @@ document.addEventListener("DOMContentLoaded", function () {
             return pump();
         }
 
+        function markFileFinished(filename, total) {
+            if (completedByFilename[filename]) return;
+
+            completedByFilename[filename] = true;
+            llmDoneCount++;
+            updateProgress(llmDoneCount, total);
+        }
+
         function handleEvent(event) {
             if (event.stage === "batch_done") {
                 updateProgress(event.total, event.total);
@@ -412,8 +424,8 @@ document.addEventListener("DOMContentLoaded", function () {
                 setTimeout(function () { card.el.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, 50);
 
             } else if (event.stage === "llm_done") {
-                llmDoneCount++;
-                updateProgress(llmDoneCount, event.total);
+                markFileFinished(event.filename, event.total);
+
                 var result = event.result;
                 resultsByFilename[event.filename] = result;
 
@@ -421,20 +433,20 @@ document.addEventListener("DOMContentLoaded", function () {
                     setPillStatus(item.statusEl, "done", "Done");
                     if (item.card) fillResultCard(item.card, result);
                 }
+
                 renderExportBtn();
 
             } else if (event.stage === "error") {
-                llmDoneCount++
-                updateProgress(llmDoneCount, event.total);
+                markFileFinished(event.filename, event.total);
+
                 var errMsg = event.error || "Unknown error";
 
                 if (item) {
                     setPillStatus(item.statusEl, "error", "Error");
 
-                    // Only add an OCR table row if OCR itself failed (no row yet).
-                    // If OCR succeeded but LLM failed, the OCR row is already there —
-                    // just update its status badge to reflect the LLM error inline
-                    // on the result card, not on the OCR table.
+                    // Only show OCR errors in the OCR output table.
+                    // If OCR already succeeded, this is an LLM/timeout error, so keep it
+                    // only in the extraction result card.
                     if (!ocrRowAddedFor[event.filename]) {
                         ocrRowAddedFor[event.filename] = true;
                         addOcrTableRow(event.filename, null, errMsg);
@@ -445,8 +457,10 @@ document.addEventListener("DOMContentLoaded", function () {
                         item.card = errCard;
                         resultsPanel.appendChild(errCard.el);
                     }
-                    if (item.card) fillResultCardError(item.card, errMsg);
+
+                    fillResultCardError(item.card, errMsg);
                 }
+
                 renderExportBtn();
             }
         }
@@ -586,7 +600,9 @@ document.addEventListener("DOMContentLoaded", function () {
             queue            = [];
             idCounter        = 0;
             resultsByFilename = {};
-            ocrRowAddedFor   = {};
+            ocrRowAddedFor = {};
+            completedByFilename = {};
+            llmDoneCount = 0;
             if (exportBtn) { exportBtn.remove(); exportBtn = null; }
             fileListEl.innerHTML = "";
             fileListEl.style.display = "none";
