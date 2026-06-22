@@ -304,20 +304,16 @@ async def _llm_task(
 # Stream Batch Pipeline (OCR, LLM, CSV)
 # ---------------------------------------------------------------------------
 
-async def _stream_batch_pipeline(files: list[UploadFile]) -> AsyncIterator[str]:
+async def _run_ocr_stage(
+    files: list[UploadFile],
+    total: int,
+    out_queue: asyncio.Queue,
+    llm_tasks: list[asyncio.Task],
+) -> None:
     """
-    OCR runs sequentially — one file at a time.
-    LLM tasks fire as each OCR completes and run concurrently,
-    capped at llm_max_concurrent (semaphore) so no file ever queues
-    inside the LLM service — eliminating timeout risk.
-    Results stream to the browser as each task settles.
+    Run OCR sequentially and start the LLM task for each file immediately
+    after its OCR text is available.
     """
-    total      = len(files)
-    llm_tasks: list[asyncio.Task] = []
-    out_queue: asyncio.Queue      = asyncio.Queue()
-    audit_records: list[dict]     = []
-
-    # --- OCR loop (sequential) ---
     for index, upload in enumerate(files, start=1):
         filename = upload.filename or f"file_{index}"
 
@@ -328,8 +324,6 @@ async def _stream_batch_pipeline(files: list[UploadFile]) -> AsyncIterator[str]:
                     "index": index, "total": total, "filename": filename,
                     "stage": "error", "error": "Only PDF files are supported.",
                 })
-                # fire a no-op task so task count stays consistent
-                llm_tasks.append(asyncio.create_task(asyncio.sleep(0)))
                 continue
 
             ocr_text = await _pdf_to_text_via_paddleocr(raw_bytes, filename)
@@ -347,49 +341,75 @@ async def _stream_batch_pipeline(files: list[UploadFile]) -> AsyncIterator[str]:
                 "index": index, "total": total, "filename": filename,
                 "stage": "error", "error": str(exc),
             })
-            llm_tasks.append(asyncio.create_task(asyncio.sleep(0)))
             continue
 
-        # Fire LLM task immediately — it will wait on semaphore internally
-        task = asyncio.create_task(
+        llm_tasks.append(asyncio.create_task(
             _llm_task(index, total, filename, ocr_text, out_queue)
-        )
-        llm_tasks.append(task)
+        ))
+
+
+async def _stream_batch_pipeline(files: list[UploadFile]) -> AsyncIterator[str]:
+    """
+    OCR runs sequentially — one file at a time.
+    LLM tasks fire as each OCR completes and run concurrently,
+    capped at llm_max_concurrent (semaphore) so no file ever queues
+    inside the LLM service — eliminating timeout risk.
+    Results stream to the browser as each task settles.
+    """
+    total      = len(files)
+    llm_tasks: list[asyncio.Task] = []
+    out_queue: asyncio.Queue      = asyncio.Queue(maxsize=max(settings.llm_max_concurrent * 2, 10))
+    audit_records: list[dict]     = []
+    ocr_task = asyncio.create_task(
+        _run_ocr_stage(files, total, out_queue, llm_tasks)
+    )
 
     # --- Drain the queue, yield events as they arrive ---
-    # We know exactly how many events to expect:
-    #   - 1 ocr_done (or error) per file  → already in queue from loop above
-    #   - 1 llm_done (or error) per file  → pushed by tasks as they complete
-    expected_llm_events = len(llm_tasks)
-    llm_events_received = 0
+    # One terminal event is emitted per file:
+    #   - OCR failure / validation failure -> error
+    #   - OCR success -> llm_done or LLM error
+    completed_files = 0
 
-    while llm_events_received < expected_llm_events:
-        event = await out_queue.get()
-        stage = event.get("stage")
+    try:
+        while completed_files < total:
+            event = await out_queue.get()
+            stage = event.get("stage")
 
-        if stage in ("llm_done", "error"):
-            llm_events_received += 1
-            if stage == "llm_done":
-                audit_records.append({
-                    "filename":      event["filename"],
-                    "extractResult": event["result"],
-                    "extractError":  None,
-                })
-            else:
-                audit_records.append({
-                    "filename":      event["filename"],
-                    "extractResult": None,
-                    "extractError":  event.get("error"),
-                })
+            if stage in ("llm_done", "error"):
+                completed_files += 1
+                if stage == "llm_done":
+                    audit_records.append({
+                        "filename":      event["filename"],
+                        "extractResult": event["result"],
+                        "extractError":  None,
+                    })
+                else:
+                    audit_records.append({
+                        "filename":      event["filename"],
+                        "extractResult": None,
+                        "extractError":  event.get("error"),
+                    })
 
-        yield json.dumps(event) + "\n"
+            yield json.dumps(event) + "\n"
 
-    # --- Audit log (server-side, after all files done) ---
-    if audit_records:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _write_audit_csv, audit_records)
+        await ocr_task
+        if llm_tasks:
+            await asyncio.gather(*llm_tasks)
 
-    yield json.dumps({"stage": "batch_done", "total": total}) + "\n"
+        # --- Audit log (server-side, after all files done) ---
+        if audit_records:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _write_audit_csv, audit_records)
+
+        yield json.dumps({"stage": "batch_done", "total": total}) + "\n"
+
+    finally:
+        pending_tasks = [ocr_task, *llm_tasks]
+        for task in pending_tasks:
+            if not task.done():
+                task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
 
 @router.post("/batch-pipeline")
