@@ -43,7 +43,7 @@ def _get_ocr():
         }
         local_kwargs = {k: v for k, v in local_kwargs.items() if v is not None}
 
-    logger.info("Loading PP-OCRv5 model (CPU)...")
+    logger.info("Loading PaddleOCR (CPU)...")
     _ocr_instance = PaddleOCR(
         lang="en",
         use_doc_orientation_classify=False,
@@ -58,6 +58,11 @@ def _get_ocr():
         enable_mkldnn=False,
         **local_kwargs,
     )
+    logger.info("OCR detector model dir: %s", _ocr_instance.text_detector.args.det_model_dir)
+    logger.info("OCR recognizer model dir: %s", _ocr_instance.text_recognizer.args.rec_model_dir)
+    logger.info("OCR classifier model dir: %s", _ocr_instance.text_classifier.args.cls_model_dir if _ocr_instance.text_classifier else None)
+    logger.info("OCR version: %s", _ocr_instance.text_detector.args.ocr_version)
+    logger.info("OCR language: %s", _ocr_instance.text_detector.args.lang)
     logger.info("Model loaded.")
     return _ocr_instance
 
