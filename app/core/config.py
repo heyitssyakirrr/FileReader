@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------------------
     # File upload
     # ---------------------------------------------------------------------------
-    allowed_upload_extensions: list[str] = [".txt", ".pdf", ".md"]
+    allowed_upload_extensions: list[str] = [".pdf"]
     max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
 
     max_files_per_batch: int = 500

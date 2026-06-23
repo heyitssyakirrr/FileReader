@@ -23,7 +23,7 @@ async def validate_and_read_upload(file: UploadFile) -> tuple[bytes, str]:
         allowed = ", ".join(settings.allowed_upload_extensions)
         raise HTTPException(
                 status_code=422,
-                detail=f"Unsupported file type '.{ext}'. Allowed types: {allowed}.",
+                detail=f"Unsupported file type '{ext}'. Allowed types: {allowed}.",
             )
 
     raw_bytes = await file.read()
