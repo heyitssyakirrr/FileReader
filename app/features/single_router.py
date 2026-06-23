@@ -1,0 +1,441 @@
+from __future__ import annotations
+
+"""
+single_router.py
+----------------
+POST /extract/single
+
+"Submit & Forget" endpoint: accepts one PDF, validates it, schedules a
+background OCR→LLM extraction task, and immediately returns a plain JSON
+acknowledgement.  The HTTP connection closes before any OCR or LLM work
+begins — the client never learns the outcome.
+
+Pipeline (server-side, detached from the HTTP connection):
+  1. Acquire global OCR lock  (one PDF through OCR at a time, across ALL users)
+  2. Run PaddleOCR            (single attempt, no retry; timeout enforced)
+  3. Release OCR lock
+  4. Acquire LLM semaphore    (capped at settings.llm_max_concurrent)
+  5. Run LLM extraction       (up to settings.llm_max_retries + 1 attempts,
+                               exponential back-off + jitter between attempts)
+  6. Release LLM semaphore
+
+On success  → append one row to single/permanent extractions.csv
+On failure  → copy failed PDF + append one row to failed/{DDMMYYYY}_FAILED/
+
+No comparison step, no reference CSV, no streaming, no job IDs, no status
+routes, no download routes.  See the implementation plan for full rationale.
+"""
+
+import asyncio
+import logging
+import random
+import shutil
+import tempfile
+import time
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import APIRouter, File, UploadFile
+from fastapi.responses import JSONResponse
+
+from app.core.config import get_settings
+from app.features.prompt import build_extraction_prompt
+from app.models.schemas import ExtractionResult
+from app.services.file_service import validate_and_read_upload
+from app.services.llm_client import LLMClient
+from app.services.paddle_ocr import process_pdf
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+router = APIRouter(prefix="/extract", tags=["Single Extraction"])
+
+# ---------------------------------------------------------------------------
+# Output paths
+# ---------------------------------------------------------------------------
+
+# Single, permanently-appended success CSV — never rotated, never date-split.
+_EXTRACTIONS_CSV = Path("single_outputs/extractions.csv")
+
+# Root of the per-day failed-files folders.
+_FAILED_ROOT = Path("failed")
+
+# Ensure base directories exist at import time so first-write never has to
+# create them (avoids a race between concurrent background tasks).
+_EXTRACTIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
+_FAILED_ROOT.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# Concurrency primitives
+# ---------------------------------------------------------------------------
+
+# OCR runs one file at a time, globally, across ALL concurrent users.
+# Using a Lock (not Semaphore) because PaddleOCR is CPU-bound and not
+# thread-safe for parallel use within a single process.
+_ocr_lock: asyncio.Lock = asyncio.Lock()
+
+# LLM semaphore: mirrors the pattern in router.py; capped at
+# settings.llm_max_concurrent (default 3, matching pod count).
+# Declared as a separate instance per plan decision #6 so this file is
+# fully self-contained and independent of router.py's lifecycle.
+_llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(settings.llm_max_concurrent)
+
+# Guards concurrent appends to _EXTRACTIONS_CSV so two LLM completions
+# arriving at nearly the same instant cannot interleave their writes.
+_csv_append_lock: asyncio.Lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# LLM client (one shared instance — LLMClient is stateless/reentrant)
+# ---------------------------------------------------------------------------
+_llm_client = LLMClient()
+
+# ---------------------------------------------------------------------------
+# CSV helpers
+# ---------------------------------------------------------------------------
+
+_SUCCESS_CSV_HEADER = "filename,bank_name,fi_num,master_account_number,sub_account_number\r\n"
+_FAILED_CSV_HEADER  = "filename,error_message,timestamp\r\n"
+
+
+def _escape_csv_field(value: str | None) -> str:
+    """RFC-4180 CSV field escaping: wrap in quotes if the value contains
+    commas, double-quotes, or newlines; escape inner double-quotes by doubling."""
+    if value is None:
+        return ""
+    s = str(value)
+    if "," in s or '"' in s or "\n" in s or "\r" in s:
+        s = '"' + s.replace('"', '""') + '"'
+    return s
+
+
+async def _append_success_row(result: ExtractionResult, filename: str) -> None:
+    """Append one success row to the permanent extractions.csv.
+
+    Guarded by _csv_append_lock so concurrent LLM completions never
+    interleave writes.  Opens in append mode each time so the file handle
+    is held only for the duration of a single write — safe across restarts.
+    """
+    row = ",".join(_escape_csv_field(v) for v in [
+        filename,
+        result.bank_name,
+        result.fi_num,
+        result.master_account_number,
+        result.sub_account_number,
+    ]) + "\r\n"
+
+    async with _csv_append_lock:
+        write_header = not _EXTRACTIONS_CSV.exists() or _EXTRACTIONS_CSV.stat().st_size == 0
+        with _EXTRACTIONS_CSV.open("a", encoding="utf-8", newline="") as fh:
+            if write_header:
+                fh.write(_SUCCESS_CSV_HEADER)
+            fh.write(row)
+            fh.flush()
+
+    logger.info("Success row written to %s for file '%s'", _EXTRACTIONS_CSV, filename)
+
+
+def _write_failure_sync(
+    pdf_bytes: bytes,
+    filename: str,
+    error_message: str,
+    timestamp: str,
+) -> None:
+    """Synchronous helper (called via run_in_executor) that:
+      1. Creates/reuses today's failed-files folder.
+      2. Writes the failed PDF bytes there (original filename, no renaming).
+      3. Appends one row to that day's failure CSV.
+
+    Both operations happen together so a failure never produces one without
+    the other.  The PDF overwrite tradeoff (two same-day same-name failures)
+    is accepted per plan Section 5.
+    """
+    today = datetime.now().strftime("%d%m%Y")
+    folder_name = f"{today}_FAILED"
+    folder_path = _FAILED_ROOT / folder_name
+    folder_path.mkdir(parents=True, exist_ok=True)
+
+    # 1. Copy failed PDF — original filename kept verbatim.
+    dest_pdf = folder_path / Path(filename).name
+    dest_pdf.write_bytes(pdf_bytes)
+
+    # 2. Append to the day's failure CSV.
+    csv_path = folder_path / f"{folder_name}.csv"
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    with csv_path.open("a", encoding="utf-8", newline="") as fh:
+        if write_header:
+            fh.write(_FAILED_CSV_HEADER)
+        row = ",".join(_escape_csv_field(v) for v in [
+            filename,
+            error_message,
+            timestamp,
+        ]) + "\r\n"
+        fh.write(row)
+        fh.flush()
+
+    logger.info(
+        "Failure recorded for '%s' in %s (error: %s)", filename, folder_path, error_message
+    )
+
+
+async def _append_failure_row(
+    pdf_bytes: bytes,
+    filename: str,
+    error_message: str,
+) -> None:
+    """Schedule the synchronous failure-write off the event loop so it
+    doesn't block other background tasks during disk I/O."""
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None,
+        _write_failure_sync,
+        pdf_bytes,
+        filename,
+        error_message,
+        timestamp,
+    )
+
+# ---------------------------------------------------------------------------
+# OCR wrapper
+# ---------------------------------------------------------------------------
+
+async def _run_ocr(pdf_bytes: bytes, filename: str) -> str:
+    """Write PDF bytes to a temp file, run PaddleOCR via executor, return text.
+
+    Wrapped in asyncio.wait_for to enforce settings.ocr_timeout_seconds —
+    without this a single malformed PDF would block the OCR lock indefinitely
+    and stall every other queued file (open item #11 from the plan, resolved
+    here by always enforcing the timeout).
+    """
+    suffix = Path(filename).suffix or ".pdf"
+    tmp_path: Path | None = None
+
+    try:
+        # Write to a named temp file (PaddleOCR needs a file path, not bytes).
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = Path(tmp.name)
+
+        loop = asyncio.get_running_loop()
+
+        # Enforce OCR timeout so a hanging PDF cannot monopolise the OCR lock.
+        text: str = await asyncio.wait_for(
+            loop.run_in_executor(None, process_pdf, str(tmp_path)),
+            timeout=settings.ocr_timeout_seconds,
+        )
+
+        logger.debug(
+            "OCR completed for '%s': %d characters extracted", filename, len(text)
+        )
+        return text
+
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+# ---------------------------------------------------------------------------
+# LLM extraction wrapper
+# ---------------------------------------------------------------------------
+
+async def _run_llm_extraction(ocr_text: str, filename: str) -> ExtractionResult:
+    """Build the prompt, call the LLM, and return a typed ExtractionResult.
+
+    The semaphore is *not* held here — callers acquire/release it around
+    this call so they can control the retry/backoff cycle independently.
+    """
+    prompt = build_extraction_prompt(ocr_text)
+    llm_result = await _llm_client.extract_fields(
+        prompt,
+        stop=[
+            "} {", "\n} {", "\n}{", "}\n{", "}\r\n{",
+            "}\n\n", "}\r\n\r\n", "}\n ", "} \n",
+            "}\n#", "}\n`", "\n}\n ", "\n}\n#",
+            "\n}\n`", "\n}\n\n", "\n}\r\n\r\n",
+        ],
+    )
+    return ExtractionResult(
+        name=llm_result.get("name"),
+        master_account_number=llm_result.get("master_account_number"),
+        sub_account_number=llm_result.get("sub_account_number"),
+        address=llm_result.get("address"),
+        fi_num=llm_result.get("fi_num"),
+        bank_name=llm_result.get("bank_name"),
+    )
+
+# ---------------------------------------------------------------------------
+# Background pipeline task
+# ---------------------------------------------------------------------------
+
+async def _process_single_file(pdf_bytes: bytes, filename: str) -> None:
+    """Full OCR → LLM pipeline, running entirely after the HTTP response
+    has already been sent.  No connection is attached; errors are silent
+    from the client's perspective and land in the failed-files folder only.
+
+    OCR stage:
+        - Serialised through the global _ocr_lock (one file at a time).
+        - Single attempt; no retry.  Timeout enforced via asyncio.wait_for.
+        - On failure → failed-files folder, task ends.
+
+    LLM stage:
+        - Up to settings.llm_max_retries + 1 attempts.
+        - Semaphore acquired fresh per attempt (released on success or failure
+          before backoff sleep, so other tasks aren't held up during the wait).
+        - Exponential back-off + jitter mirrors router.py's _llm_task exactly.
+        - On exhaustion → failed-files folder, task ends.
+
+    On success → extractions.csv row appended.
+    """
+    logger.info("Background task started for '%s'", filename)
+
+    # ------------------------------------------------------------------
+    # Stage 1: OCR
+    # ------------------------------------------------------------------
+    ocr_text: str | None = None
+
+    async with _ocr_lock:
+        logger.debug("OCR lock acquired for '%s'", filename)
+        try:
+            ocr_text = await _run_ocr(pdf_bytes, filename)
+        except asyncio.TimeoutError:
+            msg = f"OCR timed out after {settings.ocr_timeout_seconds}s"
+            logger.error("OCR timeout for '%s': %s", filename, msg)
+            await _append_failure_row(pdf_bytes, filename, msg)
+            return
+        except Exception as exc:
+            msg = f"OCR failed: {exc}"
+            logger.error("OCR error for '%s': %s", filename, exc, exc_info=True)
+            await _append_failure_row(pdf_bytes, filename, msg)
+            return
+        finally:
+            logger.debug("OCR lock released for '%s'", filename)
+
+    # If OCR produced empty text, treat it as a failure rather than sending
+    # an empty prompt to the LLM, which would waste a semaphore slot and
+    # produce a meaningless extraction.
+    if not ocr_text or not ocr_text.strip():
+        msg = "OCR returned empty text — no content extracted from PDF"
+        logger.warning("Empty OCR output for '%s'", filename)
+        await _append_failure_row(pdf_bytes, filename, msg)
+        return
+
+    # ------------------------------------------------------------------
+    # Stage 2: LLM extraction with retry
+    # ------------------------------------------------------------------
+    last_exc: Exception | None = None
+    total_attempts = settings.llm_max_retries + 1
+
+    for attempt in range(total_attempts):
+        # Back-off before every retry (not before the first attempt).
+        if attempt > 0:
+            backoff = settings.llm_retry_base_backoff * (2 ** (attempt - 1))
+            jitter = random.uniform(0.0, 1.0)
+            wait = backoff + jitter
+            logger.warning(
+                "LLM retry %d/%d for '%s' — sleeping %.1fs",
+                attempt, settings.llm_max_retries, filename, wait,
+            )
+            # Semaphore is NOT held during the sleep so other tasks aren't
+            # starved while this one waits to retry.
+            await asyncio.sleep(wait)
+
+        # Acquire semaphore fresh each attempt — fair re-entry.
+        async with _llm_semaphore:
+            logger.debug(
+                "LLM semaphore acquired for '%s' (attempt %d/%d)",
+                filename, attempt + 1, total_attempts,
+            )
+            try:
+                result = await _run_llm_extraction(ocr_text, filename)
+            except Exception as exc:
+                # Semaphore released automatically at end of async-with block.
+                last_exc = exc
+                logger.warning(
+                    "LLM attempt %d/%d failed for '%s': %s",
+                    attempt + 1, total_attempts, filename, exc,
+                )
+                continue  # next attempt; semaphore slot already freed
+
+        # ------ SUCCESS ------
+        logger.info(
+            "LLM extraction succeeded for '%s' (attempt %d/%d)",
+            filename, attempt + 1, total_attempts,
+        )
+        await _append_success_row(result, filename)
+        return
+
+    # ------ ALL ATTEMPTS EXHAUSTED ------
+    msg = f"LLM failed after {total_attempts} attempt(s): {last_exc}"
+    logger.error("LLM permanently failed for '%s': %s", filename, last_exc, exc_info=True)
+    await _append_failure_row(pdf_bytes, filename, msg)
+
+# ---------------------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/single",
+    summary="Submit & Forget — queue one PDF for background OCR → LLM extraction",
+    response_class=JSONResponse,
+    responses={
+        200: {
+            "description": "File accepted and queued. Connection closes immediately.",
+            "content": {"application/json": {"example": {"success": True, "message": "File queued successfully."}}},
+        },
+        422: {
+            "description": "Validation failure (unsupported type, file too large, etc.).",
+            "content": {"application/json": {"example": {"success": False, "message": "<reason>"}}},
+        },
+    },
+)
+async def extract_single(
+    file: UploadFile = File(..., description="Single PDF file to process"),
+) -> JSONResponse:
+    """Accept one PDF, validate it, schedule a background extraction task,
+    and return immediately.
+
+    The client's connection closes as soon as this response is sent.  No
+    further communication about this file will ever be sent to the caller —
+    OCR and LLM results are handled entirely server-side.
+
+    Success output  → single_outputs/extractions.csv
+    Failure output  → failed/{DDMMYYYY}_FAILED/ folder
+    """
+    # ------------------------------------------------------------------
+    # Validate: extension + size.  validate_and_read_upload raises
+    # HTTPException on invalid input, which FastAPI turns into the
+    # appropriate 4xx response — nothing extra needed here.
+    # ------------------------------------------------------------------
+    try:
+        pdf_bytes, _ext = await validate_and_read_upload(file)
+    except Exception as exc:
+        # Re-raise as a structured JSON response with success=false so
+        # callers that check the body (rather than HTTP status) still get
+        # a consistent shape.  FastAPI's global exception handler will also
+        # catch HTTPException if we let it propagate — either is fine, but
+        # this makes the response shape unambiguous for API consumers.
+        logger.warning("Validation failed for '%s': %s", file.filename, exc)
+        return JSONResponse(
+            status_code=getattr(exc, "status_code", 422),
+            content={"success": False, "message": getattr(exc, "detail", str(exc))},
+        )
+
+    filename = file.filename or "uploaded_file.pdf"
+    logger.info("File accepted and queued for background processing: '%s'", filename)
+
+    # ------------------------------------------------------------------
+    # Schedule the background task.
+    # asyncio.create_task schedules the coroutine on the running event loop
+    # but does NOT await it — execution continues immediately to the return
+    # statement below, so the HTTP response is sent before any OCR/LLM work
+    # begins.  pdf_bytes is already fully read into memory, so there is no
+    # dependency on the UploadFile object after this point.
+    # ------------------------------------------------------------------
+    asyncio.create_task(
+        _process_single_file(pdf_bytes, filename),
+        name=f"single_extraction:{filename}",   # named for easier debugging
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "message": "File queued successfully."},
+    )

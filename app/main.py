@@ -17,6 +17,7 @@ from app.features.router import router as extract_router
 from app.features.router import _start_cleanup_scheduler
 from app.features.ocr_router import router as ocr_router
 from app.summary.router import router as summarise_router
+from app.features.single_router import router as single_router
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -53,6 +54,7 @@ app.include_router(extract_router)
 app.include_router(batch_router)
 app.include_router(ocr_router)
 app.include_router(summarise_router)
+app.include_router(single_router)
 
 
 @app.get("/", tags=["UI"])
