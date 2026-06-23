@@ -18,6 +18,7 @@ from app.features.router import _start_cleanup_scheduler
 from app.features.ocr_router import router as ocr_router
 from app.summary.router import router as summarise_router
 from app.features.single_router import router as single_router
+from app.features.single_router import drain_pending_tasks
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -37,8 +38,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("OCR results  : results/ (in-process PaddleOCR, cleaned up by router.py)")    
     logger.info("OCR service  : POST /ocr/upload, GET /ocr/download/<file>")
     logger.info("Batch API    : POST /extract/batch (max %d files)", settings.max_files_per_batch)
+    logger.info(
+        "Single API   : POST /extract/single (max %d in-flight)",
+        settings.single_max_pending_tasks,
+    )
     _start_cleanup_scheduler()
     yield
+    # Give in-flight /extract/single background tasks (OCR/LLM pipelines
+    # already accepted but not yet finished) a bounded grace period to
+    # complete and write their CSV/failed-folder record, rather than
+    # abandoning them mid-pipeline on shutdown/redeploy.
+    await drain_pending_tasks()
     logger.info("Shutting down %s", settings.app_name)
 
 

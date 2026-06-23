@@ -22,14 +22,31 @@ Pipeline (server-side, detached from the HTTP connection):
 On success  → append one row to single/permanent extractions.csv
 On failure  → copy failed PDF + append one row to failed/{DDMMYYYY}_FAILED/
 
-No comparison step, no reference CSV, no streaming, no job IDs, no status
-routes, no download routes.  See the implementation plan for full rationale.
+No comparison step, no reference CSV, no streaming, no job IDs, no download
+routes. The only caller is filereader_client's backend (server-to-server),
+so there is no CORS concern here — CORS only restricts browser JS, never
+backend-to-backend HTTP calls.
+
+---------------------------------------------------------------------------
+Concurrency cap (in-flight background tasks)
+---------------------------------------------------------------------------
+Every accepted upload immediately schedules a background task and returns
+200 — the queueing step itself never blocks. But because OCR is a single
+global sequential lane, a burst of uploads can pile up an unbounded number
+of in-flight tasks (each holding its PDF bytes in memory) waiting their
+turn. settings.single_max_pending_tasks puts a ceiling on that: once this
+many tasks are tracked as pending, new uploads are rejected with 503
+instead of being accepted and silently queued forever.
+
+This also gives the app a clean shutdown hook: app/main.py's lifespan can
+await drain_pending_tasks() to give in-flight tasks a bounded grace period
+to finish (and write their CSV/failed-folder rows) before the process exits,
+rather than abandoning them mid-pipeline.
 """
 
 import asyncio
 import logging
 import random
-import shutil
 import tempfile
 import time
 from datetime import datetime
@@ -83,6 +100,67 @@ _llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(settings.llm_max_concurren
 # Guards concurrent appends to _EXTRACTIONS_CSV so two LLM completions
 # arriving at nearly the same instant cannot interleave their writes.
 _csv_append_lock: asyncio.Lock = asyncio.Lock()
+
+# ---------------------------------------------------------------------------
+# In-flight background task tracking (bounded concurrency + graceful drain)
+# ---------------------------------------------------------------------------
+
+# Every scheduled background task is tracked here from creation until it
+# finishes (success, failure, or cancellation). Used for two purposes:
+#   1. Capacity check in the endpoint: reject new uploads with 503 once
+#      len(_pending_tasks) >= settings.single_max_pending_tasks.
+#   2. Graceful shutdown: app/main.py awaits drain_pending_tasks() so
+#      in-flight OCR/LLM work gets a bounded chance to finish (and write
+#      its CSV/failed-folder row) instead of being abandoned mid-pipeline
+#      when the process exits.
+_pending_tasks: set[asyncio.Task] = set()
+
+
+def pending_task_count() -> int:
+    """Number of single-extraction background tasks currently in flight."""
+    return len(_pending_tasks)
+
+
+async def drain_pending_tasks(timeout: float | None = None) -> None:
+    """
+    Wait for all currently in-flight single-extraction tasks to finish,
+    up to `timeout` seconds (defaults to settings.single_shutdown_drain_seconds).
+
+    Intended to be called from app/main.py's lifespan shutdown phase so a
+    redeploy/restart doesn't silently drop PDFs that are mid-OCR or mid-LLM —
+    each task is responsible for writing its own success/failure record once
+    it completes, so giving it a chance to finish is what prevents data loss.
+
+    Tasks still running after the timeout are left to be cancelled by the
+    event loop shutdown itself; this is a best-effort grace period, not a
+    guarantee, since a single OCR call can itself take up to
+    settings.ocr_timeout_seconds.
+    """
+    effective_timeout = timeout if timeout is not None else settings.single_shutdown_drain_seconds
+
+    if not _pending_tasks:
+        return
+
+    logger.info(
+        "Draining %d in-flight single-extraction task(s) (timeout=%.0fs)...",
+        len(_pending_tasks), effective_timeout,
+    )
+    done, pending = await asyncio.wait(_pending_tasks, timeout=effective_timeout)
+
+    if pending:
+        logger.warning(
+            "%d single-extraction task(s) did not finish within the drain "
+            "window and will be abandoned on shutdown.", len(pending),
+        )
+    else:
+        logger.info("All in-flight single-extraction task(s) finished cleanly.")
+
+
+def _track_task(task: asyncio.Task) -> None:
+    """Register a background task for capacity counting + graceful drain,
+    and ensure it's automatically removed once it finishes."""
+    _pending_tasks.add(task)
+    task.add_done_callback(_pending_tasks.discard)
 
 # ---------------------------------------------------------------------------
 # LLM client (one shared instance — LLMClient is stateless/reentrant)
@@ -385,6 +463,10 @@ async def _process_single_file(pdf_bytes: bytes, filename: str) -> None:
             "description": "Validation failure (unsupported type, file too large, etc.).",
             "content": {"application/json": {"example": {"success": False, "message": "<reason>"}}},
         },
+        503: {
+            "description": "Server is at capacity — too many files already queued/processing.",
+            "content": {"application/json": {"example": {"success": False, "message": "Server is at capacity. Please retry shortly."}}},
+        },
     },
 )
 async def extract_single(
@@ -399,7 +481,30 @@ async def extract_single(
 
     Success output  → single_outputs/extractions.csv
     Failure output  → failed/{DDMMYYYY}_FAILED/ folder
+
+    Capacity guard: if settings.single_max_pending_tasks background tasks
+    are already in flight, the upload is rejected with 503 rather than
+    being accepted and piling up unbounded in memory. Checked before reading
+    the file body so an over-capacity request is rejected as cheaply as
+    possible.
     """
+    # ------------------------------------------------------------------
+    # Capacity guard — reject before doing any work if we're already at
+    # the in-flight task ceiling.
+    # ------------------------------------------------------------------
+    if pending_task_count() >= settings.single_max_pending_tasks:
+        logger.warning(
+            "Rejecting upload '%s' — at capacity (%d/%d in-flight tasks)",
+            file.filename, pending_task_count(), settings.single_max_pending_tasks,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={
+                "success": False,
+                "message": "Server is at capacity. Please retry shortly.",
+            },
+        )
+
     # ------------------------------------------------------------------
     # Validate: extension + size.  validate_and_read_upload raises
     # HTTPException on invalid input, which FastAPI turns into the
@@ -429,11 +534,15 @@ async def extract_single(
     # statement below, so the HTTP response is sent before any OCR/LLM work
     # begins.  pdf_bytes is already fully read into memory, so there is no
     # dependency on the UploadFile object after this point.
+    #
+    # The task is tracked in _pending_tasks both for the capacity check
+    # above and so app/main.py's shutdown hook can drain it gracefully.
     # ------------------------------------------------------------------
-    asyncio.create_task(
+    task = asyncio.create_task(
         _process_single_file(pdf_bytes, filename),
         name=f"single_extraction:{filename}",   # named for easier debugging
     )
+    _track_task(task)
 
     return JSONResponse(
         status_code=200,

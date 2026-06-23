@@ -41,6 +41,15 @@ class Settings(BaseSettings):
 
     max_files_per_batch: int = 500
 
+    # ---------------------------------------------------------------------------
+    # /extract/single — "Submit & Forget" concurrency cap/rate limiting
+    # ---------------------------------------------------------------------------
+    single_max_pending_tasks: int = 50
+
+    # Seconds to wait for in-flight single-extraction tasks to finish during
+    # graceful shutdown before giving up and letting the process exit anyway.
+    single_shutdown_drain_seconds: float = 30.0
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -75,6 +84,13 @@ class Settings(BaseSettings):
     def _positive_max_files(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("max_files_per_batch must be positive")
+        return v
+
+    @field_validator("single_max_pending_tasks")
+    @classmethod
+    def _positive_single_max_pending(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("single_max_pending_tasks must be positive")
         return v
 
     # ------------------------------------------------------------------
