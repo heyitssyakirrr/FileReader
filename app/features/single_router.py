@@ -407,6 +407,7 @@ async def _llm_stage(ocr_text: str, filename: str, pdf_bytes: bytes) -> None:
             # Semaphore NOT held during sleep — other tasks compete freely.
             await asyncio.sleep(wait)
 
+        # Acquire semaphore fresh each attempt (fair re-entry)
         async with _llm_semaphore:
             logger.debug(
                 "LLM semaphore acquired for '%s' (attempt %d/%d)",
@@ -415,12 +416,13 @@ async def _llm_stage(ocr_text: str, filename: str, pdf_bytes: bytes) -> None:
             try:
                 result = await _run_llm_extraction(ocr_text, filename)
             except Exception as exc:
+                # Semaphore released automatically at end of async-with block
                 last_exc = exc
                 logger.warning(
                     "LLM attempt %d/%d failed for '%s': %s",
                     attempt + 1, total_attempts, filename, exc,
                 )
-                continue  # semaphore released by async-with
+                continue  # next attempt; semaphore slot already freed
 
         # ------ SUCCESS — semaphore already released ------
         logger.info(
