@@ -21,27 +21,6 @@ Pipeline (server-side, detached from the HTTP connection):
 
 On success  → append one row to single/permanent extractions.csv
 On failure  → copy failed PDF + append one row to failed/{DDMMYYYY}_FAILED/
-
-No comparison step, no reference CSV, no streaming, no job IDs, no download
-routes. The only caller is filereader_client's backend (server-to-server),
-so there is no CORS concern here — CORS only restricts browser JS, never
-backend-to-backend HTTP calls.
-
----------------------------------------------------------------------------
-Concurrency cap (in-flight background tasks)
----------------------------------------------------------------------------
-Every accepted upload immediately schedules a background task and returns
-200 — the queueing step itself never blocks. But because OCR is a single
-global sequential lane, a burst of uploads can pile up an unbounded number
-of in-flight tasks (each holding its PDF bytes in memory) waiting their
-turn. settings.single_max_pending_tasks puts a ceiling on that: once this
-many tasks are tracked as pending, new uploads are rejected with 503
-instead of being accepted and silently queued forever.
-
-This also gives the app a clean shutdown hook: app/main.py's lifespan can
-await drain_pending_tasks() to give in-flight tasks a bounded grace period
-to finish (and write their CSV/failed-folder rows) before the process exits,
-rather than abandoning them mid-pipeline.
 """
 
 import asyncio
@@ -86,20 +65,24 @@ _FAILED_ROOT.mkdir(parents=True, exist_ok=True)
 # Concurrency primitives
 # ---------------------------------------------------------------------------
 
-# OCR runs one file at a time, globally, across ALL concurrent users.
-# Using a Lock (not Semaphore) because PaddleOCR is CPU-bound and not
-# thread-safe for parallel use within a single process.
-_ocr_lock: asyncio.Lock = asyncio.Lock()
+# OCR runs one file at a time, globally, across ALL  users.
+# Queue enforces strict FIFO order
+_ocr_queue: asyncio.Queue = asyncio.Queue()
 
 # LLM semaphore: mirrors the pattern in router.py; capped at
 # settings.llm_max_concurrent (default 3, matching pod count).
-# Declared as a separate instance per plan decision #6 so this file is
-# fully self-contained and independent of router.py's lifecycle.
 _llm_semaphore: asyncio.Semaphore = asyncio.Semaphore(settings.llm_max_concurrent)
 
 # Guards concurrent appends to _EXTRACTIONS_CSV so two LLM completions
 # arriving at nearly the same instant cannot interleave their writes.
 _csv_append_lock: asyncio.Lock = asyncio.Lock()
+
+_ocr_worker_task: asyncio.Task | None = None
+
+def start_ocr_worker() -> None:
+    global _ocr_worker_task
+    _ocr_worker_task = asyncio.create_task(_ocr_worker(), name="ocr_worker")
+    logger.info("Single-file OCR worker started.")
 
 # ---------------------------------------------------------------------------
 # In-flight background task tracking (bounded concurrency + graceful drain)
@@ -117,8 +100,8 @@ _pending_tasks: set[asyncio.Task] = set()
 
 
 def pending_task_count() -> int:
-    """Number of single-extraction background tasks currently in flight."""
-    return len(_pending_tasks)
+    """Total work in flight: queued for OCR + active LLM tasks."""
+    return _ocr_queue.qsize() + len(_pending_tasks)
 
 
 async def drain_pending_tasks(timeout: float | None = None) -> None:
@@ -344,66 +327,75 @@ async def _run_llm_extraction(ocr_text: str, filename: str) -> ExtractionResult:
 # Background pipeline task
 # ---------------------------------------------------------------------------
 
-async def _process_single_file(pdf_bytes: bytes, filename: str) -> None:
-    """Full OCR → LLM pipeline, running entirely after the HTTP response
-    has already been sent.  No connection is attached; errors are silent
-    from the client's perspective and land in the failed-files folder only.
+# ---------------------------------------------------------------------------
+# OCR worker — single consumer, drains _ocr_queue strictly in FIFO order
+# ---------------------------------------------------------------------------
 
-    OCR stage:
-        - Serialised through the global _ocr_lock (one file at a time).
-        - Single attempt; no retry.  Timeout enforced via asyncio.wait_for.
-        - On failure → failed-files folder, task ends.
-
-    LLM stage:
-        - Up to settings.llm_max_retries + 1 attempts.
-        - Semaphore acquired fresh per attempt (released on success or failure
-          before backoff sleep, so other tasks aren't held up during the wait).
-        - Exponential back-off + jitter mirrors router.py's _llm_task exactly.
-        - On exhaustion → failed-files folder, task ends.
-
-    On success → extractions.csv row appended.
+async def _ocr_worker() -> None:
     """
-    logger.info("Background task started for '%s'", filename)
+    The sole consumer of _ocr_queue. Processes one file at a time,
+    in the exact order uploads arrived. After OCR completes, fires
+    _llm_stage as an independent background task so the worker can
+    immediately pick up the next file — OCR and LLM run in parallel
+    across different files.
+    """
+    while True:
+        pdf_bytes, filename = await _ocr_queue.get()
+        logger.info("OCR worker picked up '%s'", filename)
 
-    # ------------------------------------------------------------------
-    # Stage 1: OCR
-    # ------------------------------------------------------------------
-    ocr_text: str | None = None
-
-    async with _ocr_lock:
-        logger.debug("OCR lock acquired for '%s'", filename)
         try:
             ocr_text = await _run_ocr(pdf_bytes, filename)
+
         except asyncio.TimeoutError:
             msg = f"OCR timed out after {settings.ocr_timeout_seconds}s"
             logger.error("OCR timeout for '%s': %s", filename, msg)
             await _append_failure_row(pdf_bytes, filename, msg)
-            return
+            _ocr_queue.task_done()
+            continue
+
         except Exception as exc:
             msg = f"OCR failed: {exc}"
             logger.error("OCR error for '%s': %s", filename, exc, exc_info=True)
             await _append_failure_row(pdf_bytes, filename, msg)
-            return
-        finally:
-            logger.debug("OCR lock released for '%s'", filename)
+            _ocr_queue.task_done()
+            continue
 
-    # If OCR produced empty text, treat it as a failure rather than sending
-    # an empty prompt to the LLM, which would waste a semaphore slot and
-    # produce a meaningless extraction.
-    if not ocr_text or not ocr_text.strip():
-        msg = "OCR returned empty text — no content extracted from PDF"
-        logger.warning("Empty OCR output for '%s'", filename)
-        await _append_failure_row(pdf_bytes, filename, msg)
-        return
+        if not ocr_text or not ocr_text.strip():
+            msg = "OCR returned empty text — no content extracted from PDF"
+            logger.warning("Empty OCR output for '%s'", filename)
+            await _append_failure_row(pdf_bytes, filename, msg)
+            _ocr_queue.task_done()
+            continue
 
-    # ------------------------------------------------------------------
-    # Stage 2: LLM extraction with retry
-    # ------------------------------------------------------------------
+        # OCR succeeded — release the large buffer from this scope.
+        # Pass it to _llm_stage only for the LLM-failure path.
+        # If LLM succeeds, _llm_stage lets it go out of scope naturally.
+        failure_bytes = pdf_bytes
+        pdf_bytes = None  # allow GC on the local reference
+
+        task = asyncio.create_task(
+            _llm_stage(ocr_text, filename, failure_bytes),
+            name=f"llm_stage:{filename}",
+        )
+        _track_task(task)
+        _ocr_queue.task_done()
+
+
+# ---------------------------------------------------------------------------
+# LLM stage — runs concurrently across files, capped by _llm_semaphore
+# ---------------------------------------------------------------------------
+
+async def _llm_stage(ocr_text: str, filename: str, pdf_bytes: bytes) -> None:
+    """
+    Runs LLM extraction with exponential back-off retry.
+    Up to settings.llm_max_concurrent of these run simultaneously.
+    On success  → appends row to extractions.csv
+    On failure  → copies PDF + appends row to failed/ folder
+    """
     last_exc: Exception | None = None
     total_attempts = settings.llm_max_retries + 1
 
     for attempt in range(total_attempts):
-        # Back-off before every retry (not before the first attempt).
         if attempt > 0:
             backoff = settings.llm_retry_base_backoff * (2 ** (attempt - 1))
             jitter = random.uniform(0.0, 1.0)
@@ -412,11 +404,9 @@ async def _process_single_file(pdf_bytes: bytes, filename: str) -> None:
                 "LLM retry %d/%d for '%s' — sleeping %.1fs",
                 attempt, settings.llm_max_retries, filename, wait,
             )
-            # Semaphore is NOT held during the sleep so other tasks aren't
-            # starved while this one waits to retry.
+            # Semaphore NOT held during sleep — other tasks compete freely.
             await asyncio.sleep(wait)
 
-        # Acquire semaphore fresh each attempt — fair re-entry.
         async with _llm_semaphore:
             logger.debug(
                 "LLM semaphore acquired for '%s' (attempt %d/%d)",
@@ -425,25 +415,26 @@ async def _process_single_file(pdf_bytes: bytes, filename: str) -> None:
             try:
                 result = await _run_llm_extraction(ocr_text, filename)
             except Exception as exc:
-                # Semaphore released automatically at end of async-with block.
                 last_exc = exc
                 logger.warning(
                     "LLM attempt %d/%d failed for '%s': %s",
                     attempt + 1, total_attempts, filename, exc,
                 )
-                continue  # next attempt; semaphore slot already freed
+                continue  # semaphore released by async-with
 
-        # ------ SUCCESS ------
+        # ------ SUCCESS — semaphore already released ------
         logger.info(
             "LLM extraction succeeded for '%s' (attempt %d/%d)",
             filename, attempt + 1, total_attempts,
         )
         await _append_success_row(result, filename)
-        return
+        return  # pdf_bytes goes out of scope here, GC reclaims it
 
     # ------ ALL ATTEMPTS EXHAUSTED ------
     msg = f"LLM failed after {total_attempts} attempt(s): {last_exc}"
-    logger.error("LLM permanently failed for '%s': %s", filename, last_exc, exc_info=True)
+    logger.error(
+        "LLM permanently failed for '%s': %s", filename, last_exc, exc_info=True,
+    )
     await _append_failure_row(pdf_bytes, filename, msg)
 
 # ---------------------------------------------------------------------------
@@ -527,22 +518,8 @@ async def extract_single(
     filename = file.filename or "uploaded_file.pdf"
     logger.info("File accepted and queued for background processing: '%s'", filename)
 
-    # ------------------------------------------------------------------
-    # Schedule the background task.
-    # asyncio.create_task schedules the coroutine on the running event loop
-    # but does NOT await it — execution continues immediately to the return
-    # statement below, so the HTTP response is sent before any OCR/LLM work
-    # begins.  pdf_bytes is already fully read into memory, so there is no
-    # dependency on the UploadFile object after this point.
-    #
-    # The task is tracked in _pending_tasks both for the capacity check
-    # above and so app/main.py's shutdown hook can drain it gracefully.
-    # ------------------------------------------------------------------
-    task = asyncio.create_task(
-        _process_single_file(pdf_bytes, filename),
-        name=f"single_extraction:{filename}",   # named for easier debugging
-    )
-    _track_task(task)
+    await _ocr_queue.put((pdf_bytes, filename))
+    logger.info("File queued for OCR: '%s' (queue size now ~%d)", filename, _ocr_queue.qsize())
 
     return JSONResponse(
         status_code=200,

@@ -18,7 +18,7 @@ from app.features.router import _start_cleanup_scheduler
 from app.features.ocr_router import router as ocr_router
 from app.summary.router import router as summarise_router
 from app.features.single_router import router as single_router
-from app.features.single_router import drain_pending_tasks
+from app.features.single_router import drain_pending_tasks, start_ocr_worker
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -43,6 +43,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         settings.single_max_pending_tasks,
     )
     _start_cleanup_scheduler()
+    start_ocr_worker()
     yield
     # Give in-flight /extract/single background tasks (OCR/LLM pipelines
     # already accepted but not yet finished) a bounded grace period to
