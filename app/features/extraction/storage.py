@@ -10,7 +10,7 @@ from app.models.schemas import ExtractionResult
 
 logger = logging.getLogger(__name__)
 
-_EXTRACTIONS_CSV = Path("single_outputs/extractions.csv")
+_EXTRACTIONS_CSV = Path("results/extractions.csv")
 _FAILED_ROOT = Path("failed")
 
 _EXTRACTIONS_CSV.parent.mkdir(parents=True, exist_ok=True)
