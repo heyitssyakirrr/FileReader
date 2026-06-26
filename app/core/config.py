@@ -56,6 +56,11 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
+    # ---------------------------------------------------------------------------
+    # File retention (results / failed / OCR outputs)
+    # ---------------------------------------------------------------------------
+    retention_max_days: int = 90
+
     # ------------------------------------------------------------------
     # Validators
     # ------------------------------------------------------------------
@@ -90,6 +95,13 @@ class Settings(BaseSettings):
     def _positive_single_max_pending(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("single_max_pending_tasks must be positive")
+        return v
+    
+    @field_validator("retention_max_days")
+    @classmethod
+    def _positive_retention_max_days(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("retention_max_days must be positive")
         return v
 
     # ------------------------------------------------------------------
