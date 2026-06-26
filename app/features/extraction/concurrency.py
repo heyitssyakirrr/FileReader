@@ -19,7 +19,7 @@ def pending_task_count() -> int:
 
 
 async def drain_pending_tasks(timeout: float | None = None) -> None:
-    effective_timeout = timeout if timeout is not None else settings.single_shutdown_drain_seconds
+    effective_timeout = timeout if timeout is not None else settings.extract_shutdown_drain_seconds
 
     if not _pending_tasks:
         return

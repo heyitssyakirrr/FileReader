@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.core.config import get_settings
-from app.features.extraction import router as single_router
+from app.features.extraction import router as extract_router
 from app.features.extraction import drain_pending_tasks, start_ocr_worker
 
 logging.basicConfig(
@@ -31,11 +31,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
     logger.info("LLM endpoint : %s", settings.llm_url)
     logger.info("OCR results  : results/ (in-process PaddleOCR, cleaned up by router.py)")    
-    logger.info("Single API   : POST /extract/single (max %d in-flight)",settings.single_max_pending_tasks,)
+    logger.info("Extract API   : POST /extract (max %d in-flight)",settings.extract_max_pending_tasks,)
 
     start_ocr_worker()
     yield
-    # Give in-flight /extract/single background tasks (OCR/LLM pipelines
+    # Give in-flight /extract background tasks (OCR/LLM pipelines
     # already accepted but not yet finished) a bounded grace period to
     # complete and write their CSV/failed-folder record, rather than
     # abandoning them mid-pipeline on shutdown/redeploy.
@@ -50,7 +50,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(single_router)
+app.include_router(extract_router)
 
 
 @app.get("/health", tags=["Meta"])

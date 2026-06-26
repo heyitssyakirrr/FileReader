@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.features.extraction.concurrency import _ocr_queue, pending_task_count
+from app.features.extraction.context import FileProcessingContext
 from app.services.file_service import validate_and_read_upload
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,7 @@ router = APIRouter(prefix="/extract", tags=["Single Extraction"])
 
 
 @router.post(
-    "/single",
+    "",
     summary="Submit & Forget — queue one PDF for background OCR → LLM extraction",
     response_class=JSONResponse,
     responses={
@@ -37,10 +39,10 @@ router = APIRouter(prefix="/extract", tags=["Single Extraction"])
 async def extract_single(
     file: UploadFile = File(..., description="Single PDF file to process"),
 ) -> JSONResponse:
-    if pending_task_count() >= settings.single_max_pending_tasks:
+    if pending_task_count() >= settings.extract_max_pending_tasks:
         logger.warning(
             "Rejecting upload '%s' — at capacity (%d/%d in-flight tasks)",
-            file.filename, pending_task_count(), settings.single_max_pending_tasks,
+            file.filename, pending_task_count(), settings.extract_max_pending_tasks,
         )
         return JSONResponse(
             status_code=503,
@@ -60,10 +62,30 @@ async def extract_single(
         )
 
     filename = file.filename or "uploaded_file.pdf"
-    logger.info("File accepted and queued for background processing: '%s'", filename)
+    received_at = datetime.now()
+    processing_timestamp = received_at.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    ctx = FileProcessingContext(
+        filename=filename,
+        processing_timestamp=processing_timestamp,
+        received_at=received_at,
+        file_size_bytes=len(pdf_bytes),
+        queue_depth_at_upload=_ocr_queue.qsize(),
+    )
 
-    await _ocr_queue.put((pdf_bytes, filename))
-    logger.info("File queued for OCR: '%s' (queue size now ~%d)", filename, _ocr_queue.qsize())
+    logger.info(
+        "File accepted for background processing: '%s' (run=%s, size=%d bytes)",
+        filename,
+        processing_timestamp,
+        len(pdf_bytes),
+    )
+
+    await _ocr_queue.put((ctx, pdf_bytes))
+    logger.info(
+        "File queued for OCR: '%s' (run=%s, queue size now ~%d)",
+        filename,
+        processing_timestamp,
+        _ocr_queue.qsize(),
+    )
 
     return JSONResponse(
         status_code=200,
