@@ -114,6 +114,24 @@ async def _run_llm_extraction(ctx: FileProcessingContext, ocr_text: str) -> Extr
 
 
 async def _llm_stage(ctx: FileProcessingContext, ocr_text: str, pdf_bytes: bytes) -> None:
+    try:
+        await _llm_stage_inner(ctx, ocr_text, pdf_bytes)
+    except Exception as exc:
+        logger.error(
+            "Unexpected crash in _llm_stage for '%s' (run=%s): %s",
+            ctx.filename, ctx.processing_timestamp,exc, exc_info=True,
+        )
+    # Still attempt to write the summary even on unexpected crash
+    ctx.final_status = "failed"
+    ctx.failed_stage = ctx.failed_stage or "unexpected"
+    ctx.completed_at = datetime.now()
+    try:
+        await append_file_summary(ctx)
+    except Exception:
+        pass
+
+
+async def _llm_stage_inner(ctx: FileProcessingContext, ocr_text: str, pdf_bytes: bytes) -> None:
     last_exc: Exception | None = None
     total_attempts = settings.llm_max_retries + 1
     ctx.llm_status = "running"

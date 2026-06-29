@@ -39,6 +39,16 @@ async def drain_pending_tasks(timeout: float | None = None) -> None:
         logger.info("All in-flight single-extraction task(s) finished cleanly.")
 
 
+def _on_task_done(task: asyncio.Task) -> None:
+    _pending_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error(
+            "Unhandled exception in background task '%s': %s",
+            task.get_name(),
+            task.exception(),
+            exc_info=task.exception(),
+        )
+
 def _track_task(task: asyncio.Task) -> None:
     _pending_tasks.add(task)
-    task.add_done_callback(_pending_tasks.discard)
+    task.add_done_callback(_on_task_done)
