@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import get_settings
 from app.features.extraction.concurrency import _ocr_queue, pending_task_count
 from app.features.extraction.context import FileProcessingContext
+from app.features.extraction.lifecycle import register_intake
 from app.services.file_service import validate_and_read_upload
 
 logger = logging.getLogger(__name__)
@@ -64,12 +65,19 @@ async def extract_single(
     filename = file.filename or "uploaded_file.pdf"
     received_at = datetime.now()
     processing_timestamp = received_at.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+
+    # Durably persist the upload BEFORE it is queued for processing. From
+    # this point on, the file can always be recovered on next startup even
+    # if the process stops before any later stage runs.
+    intake = await register_intake(filename, processing_timestamp, pdf_bytes)
+
     ctx = FileProcessingContext(
         filename=filename,
         processing_timestamp=processing_timestamp,
         received_at=received_at,
         file_size_bytes=len(pdf_bytes),
         queue_depth_at_upload=_ocr_queue.qsize(),
+        intake_id=intake.intake_id,
     )
 
     logger.info(

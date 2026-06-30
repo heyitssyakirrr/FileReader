@@ -13,7 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.core.config import get_settings
 from app.features.extraction import router as extract_router
-from app.features.extraction import drain_pending_tasks, start_ocr_worker
+from app.features.extraction import drain_and_finalize, get_pending_tasks, start_ocr_worker
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -33,13 +33,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("OCR results  : results/ (in-process PaddleOCR, cleaned up by router.py)")    
     logger.info("Extract API   : POST /extract (max %d in-flight)",settings.extract_max_pending_tasks,)
 
-    start_ocr_worker()
+    await start_ocr_worker()
     yield
     # Give in-flight /extract background tasks (OCR/LLM pipelines
     # already accepted but not yet finished) a bounded grace period to
-    # complete and write their CSV/failed-folder record, rather than
-    # abandoning them mid-pipeline on shutdown/redeploy.
-    await drain_pending_tasks()
+    # complete and write their CSV/failed-folder record. Anything that
+    # doesn't finish in time is NOT abandoned: its inflight copy + record
+    # file are already durable on disk, so it will be automatically
+    # recovered into failed.csv on the next startup (see lifecycle.py).
+    await drain_and_finalize(get_pending_tasks())
     logger.info("Shutting down %s", settings.app_name)
 
 

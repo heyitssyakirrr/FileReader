@@ -15,6 +15,7 @@ from app.features.extraction.concurrency import (
     _track_task,
 )
 from app.features.extraction.context import FileProcessingContext
+from app.features.extraction.lifecycle import mark_terminal, recover_orphaned_files
 from app.features.extraction.storage import append_failure_row, append_success_row, append_ocr_output
 from app.features.extraction.summary_logs import append_file_summary
 from app.features.prompt import build_extraction_prompt
@@ -46,6 +47,8 @@ async def _record_failure(
     ctx.failed_csv_path = str(failed_csv_path)
     ctx.completed_at = datetime.now()
     await append_file_summary(ctx)
+    if ctx.intake_id:
+        await mark_terminal(ctx.intake_id, ctx.filename, "failed")
 
 
 async def _run_ocr(ctx: FileProcessingContext, pdf_bytes: bytes) -> str:
@@ -119,16 +122,26 @@ async def _llm_stage(ctx: FileProcessingContext, ocr_text: str, pdf_bytes: bytes
     except Exception as exc:
         logger.error(
             "Unexpected crash in _llm_stage for '%s' (run=%s): %s",
-            ctx.filename, ctx.processing_timestamp,exc, exc_info=True,
+            ctx.filename, ctx.processing_timestamp, exc, exc_info=True,
         )
-    # Still attempt to write the summary even on unexpected crash
-    ctx.final_status = "failed"
-    ctx.failed_stage = ctx.failed_stage or "unexpected"
-    ctx.completed_at = datetime.now()
-    try:
-        await append_file_summary(ctx)
-    except Exception:
-        pass
+
+        if ctx.final_status != "failed" or not ctx.failed_csv_path:
+            try:
+                await _record_failure(
+                    ctx, pdf_bytes, ctx.failed_stage or "unexpected",
+                    f"Unexpected error: {_error_message(exc)}",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to record failure for '%s' (run=%s) after an "
+                    "unexpected crash; this file will be recovered from "
+                    "its inflight copy on next startup instead.",
+                    ctx.filename, ctx.processing_timestamp,
+                )
+        return
+
+    # _llm_stage_inner already handled its own terminal recording
+    # (success or anticipated failure) on every normal return path.
 
 
 async def _llm_stage_inner(ctx: FileProcessingContext, ocr_text: str, pdf_bytes: bytes) -> None:
@@ -193,6 +206,8 @@ async def _llm_stage_inner(ctx: FileProcessingContext, ocr_text: str, pdf_bytes:
         ctx.final_status = "success"
         ctx.completed_at = datetime.now()
         await append_file_summary(ctx)
+        if ctx.intake_id:
+            await mark_terminal(ctx.intake_id, ctx.filename, "success")
         return
 
     msg = f"LLM failed after {total_attempts} attempt(s): {_error_message(last_exc) if last_exc else 'unknown error'}"
@@ -260,7 +275,40 @@ async def _ocr_worker() -> None:
 _ocr_worker_task: asyncio.Task | None = None
 
 
-def start_ocr_worker() -> None:
+async def _recovery_record_failure(
+    filename: str,
+    pdf_bytes: bytes,
+    stage: str,
+    error_message: str,
+) -> None:
+    now = datetime.now()
+    ctx = FileProcessingContext(
+        filename=filename,
+        processing_timestamp=now.strftime("%Y%m%d_%H%M%S_%f")[:-3],
+        received_at=now,
+        file_size_bytes=len(pdf_bytes),
+        queue_depth_at_upload=0,
+    )
+    ctx.final_status = "failed"
+    ctx.failed_stage = stage
+    ctx.storage_status = "failure_written"
+    failed_pdf_path, failed_csv_path = await append_failure_row(pdf_bytes, filename, error_message)
+    ctx.failed_pdf_path = str(failed_pdf_path)
+    ctx.failed_csv_path = str(failed_csv_path)
+    ctx.completed_at = datetime.now()
+    await append_file_summary(ctx)
+
+
+async def start_ocr_worker() -> None:
     global _ocr_worker_task
+
+    recovered_count = await recover_orphaned_files(_recovery_record_failure)
+    if recovered_count:
+        logger.warning(
+            "Startup recovery: %d file(s) left in-flight by a previous "
+            "run were written to failed.csv (stage='interrupted').",
+            recovered_count,
+        )
+
     _ocr_worker_task = asyncio.create_task(_ocr_worker(), name="ocr_worker")
     logger.info("Single-file OCR worker started.")

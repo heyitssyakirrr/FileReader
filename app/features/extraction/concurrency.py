@@ -18,25 +18,13 @@ def pending_task_count() -> int:
     return _ocr_queue.qsize() + len(_pending_tasks)
 
 
-async def drain_pending_tasks(timeout: float | None = None) -> None:
-    effective_timeout = timeout if timeout is not None else settings.extract_shutdown_drain_seconds
-
-    if not _pending_tasks:
-        return
-
-    logger.info(
-        "Draining %d in-flight single-extraction task(s) (timeout=%.0fs)...",
-        len(_pending_tasks), effective_timeout,
-    )
-    done, pending = await asyncio.wait(_pending_tasks, timeout=effective_timeout)
-
-    if pending:
-        logger.warning(
-            "%d single-extraction task(s) did not finish within the drain "
-            "window and will be abandoned on shutdown.", len(pending),
-        )
-    else:
-        logger.info("All in-flight single-extraction task(s) finished cleanly.")
+def get_pending_tasks() -> "set[asyncio.Task]":
+    """
+    Snapshot of currently-tracked background tasks, for the shutdown
+    drain in lifecycle.py. Returns a copy so the caller can iterate/wait
+    on it without it mutating from under them as tasks finish.
+    """
+    return set(_pending_tasks)
 
 
 def _on_task_done(task: asyncio.Task) -> None:

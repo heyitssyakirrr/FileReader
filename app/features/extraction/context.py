@@ -11,6 +11,7 @@ class FileProcessingContext:
     received_at: datetime
     file_size_bytes: int
     queue_depth_at_upload: int
+    intake_id: str = ""
 
     ocr_status: str = "pending"
     ocr_duration_ms: int | None = None

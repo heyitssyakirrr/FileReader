@@ -77,7 +77,15 @@ def _write_failure_sync(
     files_folder = day_folder / "failed_files"
     files_folder.mkdir(parents=True, exist_ok=True)
 
-    dest_pdf = files_folder / Path(filename).name
+    # Disambiguate by time-of-day so two failures sharing the same original
+    # filename on the same day never overwrite each other's copy.
+    time_part = timestamp.split("T", 1)[-1].replace(":", "")
+    original_name = Path(filename).name
+    dest_pdf = files_folder / f"{time_part}__{original_name}"
+    suffix = 1
+    while dest_pdf.exists():
+        dest_pdf = files_folder / f"{time_part}_{suffix}__{original_name}"
+        suffix += 1
     dest_pdf.write_bytes(pdf_bytes)
 
     csv_path = day_folder / "failed.csv"
