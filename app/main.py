@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from app.core.config import get_settings
 from app.features.extraction import router as extract_router
 from app.features.extraction import drain_and_finalize, get_pending_tasks, start_ocr_worker
+from app.features.extraction.concurrency import get_ocr_process_pool, shutdown_ocr_process_pool
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -30,18 +31,15 @@ templates = Jinja2Templates(directory="app/templates")
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting %s v%s", settings.app_name, settings.app_version)
     logger.info("LLM endpoint : %s", settings.llm_url)
-    logger.info("OCR results  : results/ (in-process PaddleOCR, cleaned up by router.py)")    
-    logger.info("Extract API   : POST /extract (max %d in-flight)",settings.extract_max_pending_tasks,)
+    logger.info("OCR results  : results/ (in-process PaddleOCR, cleaned up by router.py)")
+    logger.info("Extract API   : POST /extract (max %d in-flight)", settings.extract_max_pending_tasks)
 
+    get_ocr_process_pool()          # pre-warm: spins up the worker process at startup
+                                    # instead of on the first uploaded file
     await start_ocr_worker()
     yield
-    # Give in-flight /extract background tasks (OCR/LLM pipelines
-    # already accepted but not yet finished) a bounded grace period to
-    # complete and write their CSV/failed-folder record. Anything that
-    # doesn't finish in time is NOT abandoned: its inflight copy + record
-    # file are already durable on disk, so it will be automatically
-    # recovered into failed.csv on the next startup (see lifecycle.py).
     await drain_and_finalize(get_pending_tasks())
+    await shutdown_ocr_process_pool()   # after drain, so any in-flight LLM tasks get their window first
     logger.info("Shutting down %s", settings.app_name)
 
 

@@ -5,6 +5,7 @@ import logging
 import random
 import tempfile
 import time
+from concurrent.futures import BrokenExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,8 @@ from app.features.extraction.concurrency import (
     _llm_semaphore,
     _ocr_queue,
     _track_task,
+    get_ocr_process_pool,
+    reset_broken_ocr_pool,
 )
 from app.features.extraction.context import FileProcessingContext
 from app.features.extraction.lifecycle import (
@@ -84,19 +87,28 @@ async def _run_ocr(ctx: FileProcessingContext, pdf_bytes: bytes) -> str:
             tmp_path = Path(tmp.name)
 
         loop = asyncio.get_running_loop()
-        text: str = await asyncio.wait_for(
-            loop.run_in_executor(None, process_pdf, str(tmp_path)),
-            timeout=settings.ocr_timeout_seconds,
-        )
+        try:
+            text: str = await asyncio.wait_for(
+                loop.run_in_executor(get_ocr_process_pool(), process_pdf, str(tmp_path)),
+                timeout=settings.ocr_timeout_seconds,
+            )
+        except BrokenExecutor:
+            # The OCR worker process died mid-job (e.g. native crash on a
+            # malformed PDF). Without this, every file after it would fail
+            # forever since the pool is permanently dead.
+            logger.error(
+                "OCR worker process crashed while processing '%s' (run=%s).",
+                ctx.filename, ctx.processing_timestamp,
+            )
+            reset_broken_ocr_pool()
+            raise
 
         ctx.ocr_duration_ms = int((time.perf_counter() - started) * 1000)
         ctx.ocr_char_count = len(text)
         ctx.ocr_status = "completed"
         logger.debug(
             "OCR completed for '%s' (run=%s): %d characters extracted",
-            ctx.filename,
-            ctx.processing_timestamp,
-            len(text),
+            ctx.filename, ctx.processing_timestamp, len(text),
         )
         return text
 
