@@ -40,56 +40,81 @@ def _total_duration_ms(ctx: FileProcessingContext) -> int | None:
 
 
 def build_file_summary(ctx: FileProcessingContext) -> str:
+    # Total box width including the two │ wall characters.
+    W = 82
+    # Inner width = space available for content between the two walls.
+    INNER = W - 2  # 80 chars
+
+    def wall(text: str = "") -> str:
+        """Pad `text` to INNER chars and wrap it with │ walls."""
+        return f"│{text:<{INNER}}│"
+
+    def section(label: str) -> str:
+        """Section divider: ├──[ LABEL ]──...──┤"""
+        tag = f"[ {label} ]"
+        left = "──"
+        right = "─" * (INNER - len(left) - len(tag))
+        return f"├{left}{tag}{right}┤"
+
     completed_label = "Completed" if ctx.final_status == "success" else "Failed At"
     failed_stage = ctx.failed_stage.upper() if ctx.failed_stage else "-"
 
-    lines = [
-        "=" * 80,
-        f"FILE SUMMARY | {ctx.filename} | run: {ctx.processing_timestamp}",
-        "=" * 80,
-        f"Status         : {ctx.final_status.upper()}",
-        f"Failed Stage   : {failed_stage}" if ctx.final_status == "failed" else None,
-        f"Received       : {_fmt_dt(ctx.received_at)}",
-        f"{completed_label:<15}: {_fmt_dt(ctx.completed_at)}",
-        f"Total Duration : {_fmt_ms(_total_duration_ms(ctx))}",
-        "",
-        "UPLOAD",
-        f"File Size      : {ctx.file_size_bytes:,} bytes",
-        f"Queue Depth    : {ctx.queue_depth_at_upload}",
-        "",
-        "OCR",
-        f"Status         : {ctx.ocr_status}",
-        f"Duration       : {_fmt_ms(ctx.ocr_duration_ms)}",
-        f"Chars Extracted: {ctx.ocr_char_count if ctx.ocr_char_count is not None else '-'}",
-        f"Output         : {ctx.ocr_output_path or '-'}",
-        f"Error Type     : {ctx.ocr_error_type or '-'}",
-        f"Error Message  : {ctx.ocr_error_message or '-'}",
-        "",
-        "LLM",
-        f"Status         : {ctx.llm_status}",
-        f"Attempts       : {ctx.llm_attempts} / {ctx.llm_max_attempts}",
-        f"Duration       : {_fmt_ms(ctx.llm_duration_ms)}",
-        f"HTTP Duration  : {_fmt_ms(ctx.llm_http_duration_ms)}",
-        f"HTTP Status    : {ctx.llm_status_code if ctx.llm_status_code is not None else '-'}",
-        f"Prompt Length  : {ctx.llm_prompt_length_chars if ctx.llm_prompt_length_chars is not None else '-'} chars",
-        f"Response Length: {ctx.llm_response_length_chars if ctx.llm_response_length_chars is not None else '-'} chars",
-        f"Parse Strategy : {ctx.llm_parse_strategy or '-'}",
-        f"JSON Objects   : {ctx.llm_json_objects_found if ctx.llm_json_objects_found is not None else '-'}",
-        f"Truncated      : {ctx.llm_response_truncated}",
-        f"Fields Present : {_fmt_list(ctx.llm_keys_present)}",
-        f"Fields Missing : {_fmt_list(ctx.llm_keys_missing)}",
-        f"Last Error Type: {ctx.llm_last_error_type or '-'}",
-        f"Last Error     : {ctx.llm_last_error_message or '-'}",
-        "",
-        "STORAGE",
-        f"Status         : {ctx.storage_status}",
-        f"Output         : {ctx.storage_output_path or '-'}",
-        f"Failed PDF     : {ctx.failed_pdf_path or '-'}",
-        f"Failed CSV     : {ctx.failed_csv_path or '-'}",
-        "=" * 80,
+    title = f"  FILE SUMMARY  │  {ctx.filename}  │  run: {ctx.processing_timestamp}"
+    if len(title) > INNER:
+        title = title[: INNER - 3] + "..."
+
+    top    = "┌" + "─" * INNER + "┐"
+    bottom = "└" + "─" * INNER + "┘"
+    divide = "├" + "─" * INNER + "┤"
+
+    rows = [
+        top,
+        wall(title),
+        divide,
+        wall(f"  Status         : {ctx.final_status.upper()}"),
+    ]
+
+    if ctx.final_status == "failed":
+        rows.append(wall(f"  Failed Stage   : {failed_stage}"))
+
+    rows += [
+        wall(f"  Received       : {_fmt_dt(ctx.received_at)}"),
+        wall(f"  {completed_label:<15}: {_fmt_dt(ctx.completed_at)}"),
+        wall(f"  Total Duration : {_fmt_ms(_total_duration_ms(ctx))}"),
+        section("UPLOAD"),
+        wall(f"  File Size      : {ctx.file_size_bytes:,} bytes"),
+        wall(f"  Queue Depth    : {ctx.queue_depth_at_upload}"),
+        section("OCR"),
+        wall(f"  Status         : {ctx.ocr_status}"),
+        wall(f"  Duration       : {_fmt_ms(ctx.ocr_duration_ms)}"),
+        wall(f"  Chars Extracted: {ctx.ocr_char_count if ctx.ocr_char_count is not None else '-'}"),
+        wall(f"  Output         : {ctx.ocr_output_path or '-'}"),
+        wall(f"  Error Type     : {ctx.ocr_error_type or '-'}"),
+        wall(f"  Error Message  : {ctx.ocr_error_message or '-'}"),
+        section("LLM"),
+        wall(f"  Status         : {ctx.llm_status}"),
+        wall(f"  Attempts       : {ctx.llm_attempts} / {ctx.llm_max_attempts}"),
+        wall(f"  Duration       : {_fmt_ms(ctx.llm_duration_ms)}"),
+        wall(f"  HTTP Duration  : {_fmt_ms(ctx.llm_http_duration_ms)}"),
+        wall(f"  HTTP Status    : {ctx.llm_status_code if ctx.llm_status_code is not None else '-'}"),
+        wall(f"  Prompt Length  : {ctx.llm_prompt_length_chars if ctx.llm_prompt_length_chars is not None else '-'} chars"),
+        wall(f"  Response Length: {ctx.llm_response_length_chars if ctx.llm_response_length_chars is not None else '-'} chars"),
+        wall(f"  Parse Strategy : {ctx.llm_parse_strategy or '-'}"),
+        wall(f"  JSON Objects   : {ctx.llm_json_objects_found if ctx.llm_json_objects_found is not None else '-'}"),
+        wall(f"  Truncated      : {ctx.llm_response_truncated}"),
+        wall(f"  Fields Present : {_fmt_list(ctx.llm_keys_present)}"),
+        wall(f"  Fields Missing : {_fmt_list(ctx.llm_keys_missing)}"),
+        wall(f"  Last Error Type: {ctx.llm_last_error_type or '-'}"),
+        wall(f"  Last Error     : {ctx.llm_last_error_message or '-'}"),
+        section("STORAGE"),
+        wall(f"  Status         : {ctx.storage_status}"),
+        wall(f"  Output         : {ctx.storage_output_path or '-'}"),
+        wall(f"  Failed PDF     : {ctx.failed_pdf_path or '-'}"),
+        wall(f"  Failed CSV     : {ctx.failed_csv_path or '-'}"),
+        bottom,
         "",
     ]
-    return "\n".join(line for line in lines if line is not None)
+    return "\n".join(rows)
 
 
 def enforce_summary_log_retention() -> None:

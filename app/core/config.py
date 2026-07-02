@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     allowed_upload_extensions: list[str] = [".pdf"]
     max_upload_bytes: int = 10 * 1024 * 1024  # 10 MB
 
-    max_files_per_batch: int = 500
+    max_files_per_batch: int = 500 # not used since no more batch processing
 
     # ---------------------------------------------------------------------------
     # /extract — "Submit & Forget" concurrency cap/rate limiting

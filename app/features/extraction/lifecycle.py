@@ -1,52 +1,3 @@
-"""
-Durability layer for the single-extraction pipeline.
-
-Problem this module solves
----------------------------
-Every uploaded file moves through OCR-queue -> OCR -> LLM stage purely in
-process memory (an asyncio.Queue entry, then a Python variable closed over
-by a background asyncio.Task). If the process stops for ANY reason while a
-file is mid-flight -- graceful shutdown, redeploy, crash, OOM-kill, power
-loss -- that file disappears with no trace: not in extractions.csv, not in
-failed.csv, no copy in failed_files/, no summary log line.
-
-Fix
----
-Two durable, on-disk artifacts per in-flight file, both owned by this
-module only, both written the moment a file is accepted -- *before* it is
-ever queued for OCR:
-
-1. The raw PDF bytes themselves, staged under uploads/inflight/files/.
-   This replaces relying on the in-memory `pdf_bytes` variable for failure
-   recovery -- a real, durable copy now exists from intake onward.
-2. A small JSON "record" file (uploads/inflight/records/{intake_id}.json)
-   describing that upload. One file per upload, not one shared log, so:
-     - there is nothing to compact or prune -- the record is deleted the
-       instant the file reaches a terminal state (mark_terminal), so the
-       on-disk footprint is always exactly "however many files are
-       currently in flight", never larger.
-     - a torn/partial write from a hard kill can only ever affect that one
-       file's own record, never any other file's.
-
-On every startup (`recover_orphaned_files`), any record file still present
-means its upload was accepted but never reached a terminal state -- i.e.
-the previous run died while it was mid-pipeline. It is recovered using its
-staged PDF bytes and written into the existing failed CSV / failed_files /
-summary log via the same storage.py code paths that normal failures
-already use, so success/failure recording semantics are not duplicated,
-only triggered from a second place.
-
-On shutdown (`drain_and_finalize`), in-flight tasks are still given a
-bounded grace period to finish normally (unchanged behavior), but anything
-that *doesn't* finish in time is no longer "abandoned" -- it is simply left
-for `recover_orphaned_files` to pick up on the next boot, because its
-staged bytes and record file are already safely on disk.
-
-Everything else in the codebase only ever calls the public functions
-below. No other module needs to know the record format or the inflight
-directory layout.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -61,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
+from app.features.extraction.context import FileProcessingContext
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -75,10 +27,15 @@ _RECORDS_DIR = _LIFECYCLE_ROOT / "records"
 _FILES_DIR.mkdir(parents=True, exist_ok=True)
 _RECORDS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Filenames are attacker-controlled (HTTP upload). Strip path separators
-# and anything that isn't a safe filename character before ever using the
-# value to build a path on disk.
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _ensure_files_dir() -> None:
+    _FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_records_dir() -> None:
+    _RECORDS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _safe_filename_component(filename: str) -> str:
@@ -109,6 +66,7 @@ def _write_record_sync(intake_id: str, record: dict[str, Any]) -> None:
     # half-written record file behind -- Path.replace is atomic on the
     # same filesystem, so the record file always either fully exists with
     # valid JSON, or doesn't exist at all.
+    _ensure_records_dir()
     final_path = _record_path(intake_id)
     tmp_path = final_path.with_suffix(".json.tmp")
     tmp_path.write_text(json.dumps(record, separators=(",", ":")), encoding="utf-8")
@@ -116,26 +74,50 @@ def _write_record_sync(intake_id: str, record: dict[str, Any]) -> None:
 
 
 async def _write_record(intake_id: str, record: dict[str, Any]) -> None:
-    loop = asyncio.get_running_loop()
+    # get the current event loop (the engine that manages async tasks)
+    loop = asyncio.get_running_loop() 
+    # hands _write_record_sync to a thread pool executor, which runs it in a separate thread
+    # await suspends the current coroutine until _write_record_sync completes, allowing other tasks to run in the meantime
+    # "run the disk write on a background thread, don't freeze the event loop while waiting, then continue."
     await loop.run_in_executor(None, _write_record_sync, intake_id, record)
+
+
+def _read_record_sync(intake_id: str) -> dict[str, Any] | None:
+    path = _record_path(intake_id)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _update_record_sync(intake_id: str, patch: dict[str, Any]) -> None:
+    existing = _read_record_sync(intake_id)
+    if existing is None:
+        logger.warning(
+            "Skipping in-place update for intake_id=%s: its record is "
+            "missing or unreadable (likely already resolved, or a torn "
+            "write from a hard kill).", intake_id,
+        )
+        return
+    existing.update(patch)
+    _write_record_sync(intake_id, existing)
+
+
+async def _update_record(intake_id: str, patch: dict[str, Any]) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _update_record_sync, intake_id, patch)
 
 
 # ---------------------------------------------------------------------------
 # Public API: intake
 # ---------------------------------------------------------------------------
 async def register_intake(filename: str, processing_timestamp: str, pdf_bytes: bytes) -> IntakeRecord:
-    """
-    Durably persist an accepted upload BEFORE it is queued for processing.
-
-    Must be called synchronously in the request path, before the file is
-    handed to the OCR queue. Once this returns, the file is guaranteed to
-    be recoverable even if the process dies one line later.
-    """
     intake_id = uuid.uuid4().hex[:12]
     inflight_name = _intake_filename(processing_timestamp, intake_id, filename)
     inflight_path = _FILES_DIR / inflight_name
 
     loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _ensure_files_dir)
     await loop.run_in_executor(None, inflight_path.write_bytes, pdf_bytes)
 
     await _write_record(intake_id, {
@@ -151,17 +133,25 @@ async def register_intake(filename: str, processing_timestamp: str, pdf_bytes: b
 
 
 # ---------------------------------------------------------------------------
+# Public API: OCR-complete checkpoint (enables resume to skip OCR)
+# ---------------------------------------------------------------------------
+async def mark_ocr_complete(intake_id: str, ocr_output_path: str) -> None:
+    if not intake_id:
+        return
+    try:
+        await _update_record(intake_id, {"ocr_output_path": ocr_output_path})
+    except Exception:
+        logger.warning(
+            "Failed to checkpoint OCR completion for intake_id=%s; if the "
+            "process dies before the LLM stage finishes, this file will "
+            "redo OCR on resume instead of skipping it.", intake_id,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Public API: terminal state + cleanup
 # ---------------------------------------------------------------------------
 async def mark_terminal(intake_id: str, filename: str, final_status: str) -> None:
-    """
-    Call exactly once a file reaches success or failure. Deletes its record
-    file and its staged PDF copy -- by this point the outcome is already
-    durable elsewhere (extractions.csv, or failed.csv + failed_files/, both
-    written by storage.py before this is called), so nothing further needs
-    to be kept around for this file. There is no log to compact: once this
-    runs, this file leaves zero trace in the inflight area, by design.
-    """
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _clear_inflight_sync, intake_id)
     logger.debug(
@@ -177,8 +167,108 @@ def _clear_inflight_sync(intake_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Public API: startup recovery
+# Public API: resume (re-enter the live pipeline instead of failing outright)
 # ---------------------------------------------------------------------------
+async def resume_interrupted_files(requeue_for_ocr_fn, requeue_for_llm_fn) -> int:
+    loop = asyncio.get_running_loop()
+    records = await loop.run_in_executor(None, _read_all_records_sync)
+    eligible = [r for r in records if not r.get("resume_attempted")]
+    if not eligible:
+        return set()
+
+    logger.warning(
+        "Resuming %d file(s) left in-flight by a previous run that did "
+        "not shut down cleanly (each gets exactly one resume attempt).",
+        len(eligible),
+    )
+
+    resumed_intake_ids: set[str] = set()
+    for record in eligible:
+        intake_id = record.get("intake_id", "")
+        inflight_path = Path(record.get("inflight_path", ""))
+        filename = record.get("filename") or inflight_path.name or "unknown.pdf"
+        processing_timestamp = record.get("processing_timestamp", "")
+        ocr_output_path_str = record.get("ocr_output_path")
+
+        if not inflight_path.exists():
+            # No staged PDF to resume from at all -- nothing safe to do
+            # here. Leave it for recover_orphaned_files, which will log
+            # and drop it (same handling as today for this exact case).
+            continue
+
+        # Commit the one-shot flag BEFORE doing anything risky with this
+        # file, so a crash during the resume attempt itself can never
+        # cause a second resume on the next restart.
+        try:
+            await _update_record(intake_id, {"resume_attempted": True})
+        except Exception:
+            logger.exception(
+                "Failed to set resume_attempted flag for '%s' "
+                "(intake_id=%s); skipping resume for this file this "
+                "startup to avoid a possible repeat-resume loop. It will "
+                "be retried on the next startup.", filename, intake_id,
+            )
+            continue
+
+        try:
+            pdf_bytes = await loop.run_in_executor(None, inflight_path.read_bytes)
+        except OSError:
+            logger.exception(
+                "Failed to read staged PDF for '%s' (intake_id=%s) during "
+                "resume; leaving it for recovery as a failure instead.",
+                filename, intake_id,
+            )
+            continue
+
+        ctx = FileProcessingContext(
+            filename=filename,
+            processing_timestamp=processing_timestamp or datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3],
+            received_at=datetime.now(),
+            file_size_bytes=len(pdf_bytes),
+            queue_depth_at_upload=0,
+            intake_id=intake_id,
+        )
+
+        if ocr_output_path_str:
+            ocr_output_path = Path(ocr_output_path_str)
+            try:
+                ocr_text = await loop.run_in_executor(None, ocr_output_path.read_text, "utf-8")
+            except OSError:
+                # Checkpoint says OCR finished, but the txt is no longer
+                # readable (deleted by manual cleanup, retention, etc).
+                # Fall back to redoing OCR rather than losing the file --
+                # safe, just slightly slower than the ideal path.
+                logger.warning(
+                    "OCR checkpoint exists for '%s' (intake_id=%s) but its "
+                    "txt at %s is unreadable; resuming via OCR instead of "
+                    "skipping it.", filename, intake_id, ocr_output_path,
+                )
+                await requeue_for_ocr_fn(ctx, pdf_bytes)
+            else:
+                ctx.ocr_output_path = str(ocr_output_path)
+                logger.info(
+                    "Resuming '%s' (intake_id=%s) directly into the LLM "
+                    "stage using its saved OCR output.", filename, intake_id,
+                )
+                await requeue_for_llm_fn(ctx, ocr_text, pdf_bytes)
+        else:
+            logger.info(
+                "Resuming '%s' (intake_id=%s) via the OCR queue (no saved "
+                "OCR output found).", filename, intake_id,
+            )
+            await requeue_for_ocr_fn(ctx, pdf_bytes)
+
+        # Recorded as resumed only now -- after the flag was durably
+        # committed AND the requeue call was actually made. This is the
+        # set recover_orphaned_files must exclude this same startup, so a
+        # file just handed back into the pipeline isn't immediately
+        # treated as a still-unresolved orphan before it's had a chance
+        # to run.
+        resumed_intake_ids.add(intake_id)
+
+    return resumed_intake_ids
+
+
 def _read_all_records_sync() -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for record_path in _RECORDS_DIR.glob("*.json"):
@@ -199,45 +289,28 @@ def _read_all_records_sync() -> list[dict[str, Any]]:
     return records
 
 
-async def recover_orphaned_files(record_failure_fn) -> int:
-    """
-    Run once at startup, before the OCR worker begins accepting new work.
-
-    `record_failure_fn` is an injected callback:
-        async (intake_id, filename, pdf_bytes, stage, error_message) -> None
-    It is responsible for both writing the failure record (failed.csv +
-    failed_files/) AND calling mark_terminal(intake_id, ...) itself,
-    immediately after that write succeeds -- mirroring exactly how
-    pipeline._record_failure handles the live failure path. This ensures
-    a downstream bug (e.g. in summary-log writing) can never leave the
-    lifecycle record unresolved, which would otherwise cause the same
-    orphan to be "recovered" again -- and get a duplicate failed.csv row
-    -- on every subsequent restart.
-
-    Lifecycle deliberately does not import pipeline.py's failure-recording
-    logic directly, to avoid a circular import (pipeline.py is what calls
-    into this module). The caller (pipeline.start_ocr_worker) wires the
-    real implementation in.
-
-    Every record file still present at startup is, by definition, orphaned
-    -- mark_terminal deletes the record the instant a file resolves, so
-    anything left over can only mean the previous run stopped before that
-    file finished.
-
-    Returns the number of orphaned files recovered.
-    """
+async def recover_orphaned_files(
+    record_failure_fn,
+    exclude_intake_ids: "set[str] | None" = None,
+) -> int:
+    
+    exclude_intake_ids = exclude_intake_ids or set()
     loop = asyncio.get_running_loop()
     records = await loop.run_in_executor(None, _read_all_records_sync)
-    if not records:
+    already_resumed_once = [
+        r for r in records
+        if r.get("resume_attempted") and r.get("intake_id") not in exclude_intake_ids
+    ]
+    if not already_resumed_once:
         return 0
 
     logger.warning(
-        "Recovering %d orphaned file(s) left in-flight by a previous "
-        "run that did not shut down cleanly.", len(records),
+        "Recovering %d file(s) that already had one resume attempt in a "
+        "previous run and are still unresolved.", len(already_resumed_once),
     )
 
     recovered = 0
-    for record in records:
+    for record in already_resumed_once:
         intake_id = record.get("intake_id", "")
         inflight_path = Path(record.get("inflight_path", ""))
         filename = record.get("filename") or inflight_path.name or "unknown.pdf"
@@ -261,10 +334,11 @@ async def recover_orphaned_files(record_failure_fn) -> int:
                 intake_id,
                 filename,
                 pdf_bytes,
-                "interrupted",
+                "resume_failed",
                 "Processing was interrupted by an application shutdown or "
-                "crash before this file reached a terminal state; "
-                "recovered automatically on the next startup.",
+                "crash, and a previous automatic resume attempt also did "
+                "not complete. This file was not retried again "
+                "automatically; please re-upload it if needed.",
             )
             recovered += 1
         except Exception:
@@ -284,16 +358,6 @@ async def recover_orphaned_files(record_failure_fn) -> int:
 # Public API: shutdown drain
 # ---------------------------------------------------------------------------
 async def drain_and_finalize(pending_tasks: "set[asyncio.Task]", timeout: float | None = None) -> None:
-    """
-    Bounded best-effort wait for in-flight tasks during graceful shutdown.
-
-    This is intentionally NOT the only safety net -- it is a courtesy that
-    lets fast-finishing work complete normally instead of being recovered
-    the slow way on next boot. Anything that doesn't finish within the
-    timeout is left exactly as-is (staged bytes + record file already on
-    disk) and will be picked up by `recover_orphaned_files` on the next
-    startup, so no special abandonment handling is needed here.
-    """
     effective_timeout = timeout if timeout is not None else settings.extract_shutdown_drain_seconds
 
     if not pending_tasks:

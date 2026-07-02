@@ -36,7 +36,7 @@ async def validate_and_read_upload(file: UploadFile) -> tuple[bytes, str]:
     
     return raw_bytes, ext
 
-
+# need to delete since not used anywhere 
 def decode_txt_bytes(raw_bytes: bytes) -> str:
     try:
         return raw_bytes.decode("utf-8")
